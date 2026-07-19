@@ -180,6 +180,80 @@ class SAM2Modified(SAM2Train):
             object_score_logits,
         )
 
+    def forward_single_image(
+        self,
+        images,
+        point_inputs=None,
+        mask_inputs=None,
+        multimask_output=False,
+    ):
+        assert images.dim() == 4
+
+        # image_encoder
+        backbone_out = self.forward_image(images)
+
+        # backbone_out = {
+        #     "vision_features": ...,
+        #     "vision_pos_enc": ...,
+        #     "backbone_fpn": ...,
+        #     "left_high_res_features": ...,
+        #     "right_high_res_features": ...,
+        #     }
+
+        # mask_decoder 主要输入
+        pix_feat = backbone_out["vision_features"]
+
+        left_outputs = self._forward_one_sam_head(
+            mask_decoder=self.left_mask_decoder,
+            prompt_encoder=self.sam_prompt_encoder,
+            backbone_features=pix_feat,
+            point_inputs=point_inputs,
+            mask_inputs=mask_inputs,
+            high_res_features=backbone_out["left_high_res_features"],
+            multimask_output=multimask_output,
+        )
+
+        right_outputs = self._forward_one_sam_head(
+            mask_decoder=self.right_mask_decoder,
+            prompt_encoder=self.sam_prompt_encoder,
+            backbone_features=pix_feat,
+            point_inputs=point_inputs,
+            mask_inputs=mask_inputs,
+            high_res_features=backbone_out["right_high_res_features"],
+            multimask_output=multimask_output,
+        )
+        # right_outputs:
+        # return (
+        # low_res_multimasks,
+        # high_res_multimasks,
+        # ious,
+        # low_res_masks,
+        # high_res_masks,
+        # obj_ptr,
+        # object_score_logits,
+        # )
+        
+        return {
+            "left": {
+                "low_res_multimasks": left_outputs[0],
+                "high_res_multimasks": left_outputs[1],
+                "ious": left_outputs[2],
+                "low_res_masks": left_outputs[3],
+                "high_res_masks": left_outputs[4],
+                "obj_ptr": left_outputs[5],
+                "object_score_logits": left_outputs[6],
+            },
+            "right": {
+                "low_res_multimasks": right_outputs[0],
+                "high_res_multimasks": right_outputs[1],
+                "ious": right_outputs[2],
+                "low_res_masks": right_outputs[3],
+                "high_res_masks": right_outputs[4],
+                "obj_ptr": right_outputs[5],
+                "object_score_logits": right_outputs[6],
+            }
+        }
+
     def _project_high_res_features(
         self,
         backbone_fpn,
