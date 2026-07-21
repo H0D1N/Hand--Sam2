@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-
+import logging
 import cv2
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import functional as TF
+
+from .frame_sampler import FramesPerSecondSampler
 
 try:
     import albumentations as A
@@ -400,3 +402,98 @@ def collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "sample_id": [item["sample_id"] for item in batch],
         "dataset_name": [item["dataset_name"] for item in batch],
     }
+
+
+def build_dataloaders(
+        args: Any,
+        device: torch.device,
+) -> tuple[DataLoader, DataLoader, FramesPerSecondSampler]:
+    """创建训练/验证 Dataset、FPS Sampler 和 DataLoader。"""
+    train_dataset = MultiServerDualHandDataset(
+        dataset_root=args.dataset_root,
+        split="train",
+        test_seq_count=args.test_seq_count,
+        image_size=args.image_size,
+        use_augmentation=not args.disable_augmentation,
+        dataset_names=args.dataset_names,
+    )
+
+    val_dataset = MultiServerDualHandDataset(
+        dataset_root=args.dataset_root,
+        split="val",
+        test_seq_count=args.test_seq_count,
+        image_size=args.image_size,
+        use_augmentation=False,
+        dataset_names=args.dataset_names,
+    )
+
+    train_sampler = FramesPerSecondSampler(
+        dataset=train_dataset,
+        frames_per_second=args.frames_per_second,
+        shuffle=True,
+        seed=args.seed,
+    )
+
+    val_sampler = FramesPerSecondSampler(
+        dataset=val_dataset,
+        frames_per_second=args.frames_per_second,
+        shuffle=False,
+        seed=args.seed,
+    )
+
+    if len(train_sampler) == 0:
+        raise ValueError("训练 Sampler 没有选出任何样本")
+
+    if len(val_sampler) == 0:
+        raise ValueError("验证 Sampler 没有选出任何样本")
+
+    train_loader_kwargs: dict[str, object] = {
+        "dataset": train_dataset,
+        "batch_size": args.batch_size,
+        "sampler": train_sampler,
+        "num_workers": args.num_workers,
+        "pin_memory": device.type == "cuda",
+        "collate_fn": collate_batch,
+    }
+
+    val_loader_kwargs: dict[str, object] = {
+        "dataset": val_dataset,
+        "batch_size": args.val_batch_size,
+        "sampler": val_sampler,
+        "num_workers": args.num_workers,
+        "pin_memory": device.type == "cuda",
+        "collate_fn": collate_batch,
+    }
+
+    if args.num_workers > 0:
+        train_loader_kwargs.update(
+            {
+                "persistent_workers": True,
+                "prefetch_factor": max(2, args.prefetch_factor,),
+            }
+        )
+
+        val_loader_kwargs.update(
+            {
+                "persistent_workers": True,
+                "prefetch_factor": max(2, args.prefetch_factor,),
+            }
+        )
+
+    train_loader = DataLoader(
+        **train_loader_kwargs
+    )
+
+    val_loader = DataLoader(
+        **val_loader_kwargs
+    )
+
+    logging.info(
+    "Dataloaders built | Train: %d | Val: %d | Batch: %d",
+    len(train_loader.sampler),
+    len(val_loader.sampler),
+    args.batch_size,
+    )
+
+    return train_loader, val_loader, train_sampler
+

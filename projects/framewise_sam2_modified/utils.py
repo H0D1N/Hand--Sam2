@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from PIL import Image
 import os
 import json
-
+import random
 
 def upsample_logits(logits: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
     return F.interpolate(logits, size=size, mode="bilinear", align_corners=False)
@@ -64,17 +64,6 @@ def save_dual_hand_visualization(
     save_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(concat_image).save(save_path)
 
-def configure_finetune_stage(
-        model: torch.nn.Module,
-) -> None:
-    """
-    冻结整个模型，只训练左右手 MaskDecoder。
-    """
-
-    model.requires_grad_(False)
-
-    model.left_mask_decoder.requires_grad_(True)
-    model.right_mask_decoder.requires_grad_(True)
 
 def save_checkpoint(
         output_path: str | Path,
@@ -227,3 +216,23 @@ def save_training_curves(
     figure.clear()
 
     os.replace(temporary_path, output_path)
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+def configure_runtime(device: torch.device, use_tf32: bool, channels_last: bool = False) -> None:
+    if device.type != "cuda":
+        return
+    if device.index is not None:
+        torch.cuda.set_device(device)
+    if use_tf32:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+    torch.backends.cudnn.benchmark = True
+

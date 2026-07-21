@@ -276,3 +276,16 @@ def build_sam2_modified_tiny(
         model.eval()
 
     return model
+
+def configure_finetune_stage(
+        model: torch.nn.Module,
+) -> None:
+    """
+    冻结整个模型，只训练左右手 MaskDecoder。
+    """
+
+    model.requires_grad_(False)
+
+    model.left_mask_decoder.requires_grad_(True)
+    model.right_mask_decoder.requires_grad_(True)
+
