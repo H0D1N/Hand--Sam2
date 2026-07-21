@@ -132,6 +132,7 @@ def run_validation_epoch(
     total_iou = 0.0
     total_dice = 0.0
     total_samples = 0
+    total_foreground_hands = 0
 
     vis_dir = (
         Path(args.output_dir)
@@ -186,14 +187,18 @@ def run_validation_epoch(
             left_iou = iou_target_from_logits(left_logits, original_left_mask)
             right_iou = iou_target_from_logits(right_logits, original_right_mask)
 
-            iou = (left_iou + right_iou) / 2.0
-
             left_dice = 2.0 * left_iou / (1.0 + left_iou)
             right_dice = 2.0 * right_iou / (1.0 + right_iou)
-            dice = (left_dice + right_dice) / 2.0
 
-            total_iou += iou.item()
-            total_dice += dice.item()
+            if original_left_mask.any().item():
+                total_iou += left_iou.item()
+                total_dice += left_dice.item()
+                total_foreground_hands += 1
+
+            if original_right_mask.any().item():
+                total_iou += right_iou.item()
+                total_dice += right_dice.item()
+                total_foreground_hands += 1
 
             if not args.skip_visualizations and num_vis_saved < max_vis_to_save:
                 save_dual_hand_visualization(
@@ -214,12 +219,12 @@ def run_validation_epoch(
                 step,
                 len(loader),
                 total_loss / total_samples,
-                total_iou / total_samples,
-                total_dice / total_samples,
+                total_iou / total_foreground_hands,
+                total_dice / total_foreground_hands,
             )
 
     return {
         "loss": total_loss / total_samples,
-        "iou": total_iou / total_samples,
-        "dice": total_dice / total_samples,
+        "iou": total_iou / total_foreground_hands,
+        "dice": total_dice / total_foreground_hands,
     }
