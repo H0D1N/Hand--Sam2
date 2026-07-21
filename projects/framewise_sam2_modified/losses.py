@@ -1,4 +1,4 @@
-"""计算 SAM2Modified 左右手两个解码分支的 BCE、Dice 和 IoU 损失，并将两侧损失取平均作为模型训练的总损失。"""
+"""计算 SAM2Modified 左右手分支的 mask、IoU 和object_score_logits。"""
 import torch
 import torch.nn.functional as F
 
@@ -43,12 +43,37 @@ def iou_target_from_logits(
     
     return (intersection + 1e-6) / (union + 1e-6)
 
+def object_score_loss_from_logits(
+    object_score_logits: torch.Tensor,
+    target_masks: torch.Tensor,
+) -> torch.Tensor:
+    """
+    根据 GT mask 是否为空，监督模型预测目标是否存在。
+
+    object_score_logits: [B, 1] 或 [B]
+    target_masks: [B, 1, H, W]
+    """
+
+    object_exists = (
+        target_masks
+        .flatten(start_dim=1)
+        .amax(dim=1)
+        .gt(0.5)
+        .to(dtype=object_score_logits.dtype)
+    )
+
+    return F.binary_cross_entropy_with_logits(
+        object_score_logits.reshape(-1),
+        object_exists,
+    )
+
 def one_hand_loss(
     hand_outputs: dict[str, torch.Tensor],
     target_masks: torch.Tensor,
     bce_weight: float = 1.0,
     dice_weight: float = 1.0,
     iou_weight: float = 0.1,
+    object_score_weight: float = 1.0,
 ):
     """
     计算单只手的全部loss
@@ -69,7 +94,7 @@ def one_hand_loss(
     Outputs:
     total_loss: tensor []
 
-    loss_details: dict, {"bce": bce_loss, "dice": dice_loss,"iou": iou_loss}
+    loss_details: dict，包含 BCE、Dice、IoU 和 object score loss。
     """
 
     logits = hand_outputs["high_res_masks"]
@@ -84,9 +109,25 @@ def one_hand_loss(
     target_ious = iou_target_from_logits(logits.detach(), target_masks)
     iou_loss = F.mse_loss(predicted_ious.view(-1), target_ious.view(-1))
 
-    total_loss = bce_weight * bce_loss + dice_weight * dice_loss + iou_weight * iou_loss
+    # 计算 object_score_loss
+    object_score_loss = object_score_loss_from_logits(
+        object_score_logits=hand_outputs["object_score_logits"],
+        target_masks=target_masks,
+    )
 
-    loss_details = {"bce": bce_loss, "dice": dice_loss,"iou": iou_loss}
+    total_loss = (
+        bce_weight * bce_loss
+        + dice_weight * dice_loss
+        + iou_weight * iou_loss
+        + object_score_weight * object_score_loss
+    )
+
+    loss_details = {
+        "bce": bce_loss,
+        "dice": dice_loss,
+        "iou": iou_loss,
+        "object_score": object_score_loss,
+    }
 
     return total_loss, loss_details
 
@@ -96,26 +137,29 @@ def dual_hand_loss(
     right_masks: torch.Tensor,
     bce_weight: float = 1.0,
     dice_weight: float = 1.0,
-    iou_weight: float = 0.1
+    iou_weight: float = 0.1,
+    object_score_weight: float = 1.0,
 ):
     """
     分别计算双手的loss，之后取平均
     """
 
     left_loss, left_details = one_hand_loss(
-        model_output["left"],
-        left_masks,
-        bce_weight,
-        dice_weight,
-        iou_weight
+        hand_outputs=model_output["left"],
+        target_masks=left_masks,
+        bce_weight=bce_weight,
+        dice_weight=dice_weight,
+        iou_weight=iou_weight,
+        object_score_weight=object_score_weight,
     )
 
     right_loss, right_details = one_hand_loss(
-        model_output["right"],
-        right_masks,
-        bce_weight,
-        dice_weight,
-        iou_weight
+        hand_outputs=model_output["right"],
+        target_masks=right_masks,
+        bce_weight=bce_weight,
+        dice_weight=dice_weight,
+        iou_weight=iou_weight,
+        object_score_weight=object_score_weight,
     )
 
     total_loss = (left_loss + right_loss) / 2.0

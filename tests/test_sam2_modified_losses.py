@@ -14,6 +14,7 @@ from projects.framewise_sam2_modified.losses import (
     dice_loss_from_logits,
     dual_hand_loss,
     iou_target_from_logits,
+    object_score_loss_from_logits,
     one_hand_loss,
 )
 
@@ -67,6 +68,35 @@ def check_iou_target():
     )
 
 
+def check_object_score_loss():
+    target_masks = torch.tensor(
+        [
+            [[[1.0, 0.0],
+              [0.0, 0.0]]],
+            [[[0.0, 0.0],
+              [0.0, 0.0]]],
+        ]
+    )
+
+    good_logits = torch.tensor(
+        [[10.0], [-10.0]],
+    )
+    bad_logits = -good_logits
+
+    good_loss = object_score_loss_from_logits(
+        object_score_logits=good_logits,
+        target_masks=target_masks,
+    )
+    bad_loss = object_score_loss_from_logits(
+        object_score_logits=bad_logits,
+        target_masks=target_masks,
+    )
+
+    assert good_loss.ndim == 0
+    assert bad_loss.ndim == 0
+    assert good_loss.item() < bad_loss.item()
+
+
 def check_dual_hand_loss():
     left_masks = torch.tensor(
         [[[[1.0, 0.0],
@@ -96,14 +126,26 @@ def check_dual_hand_loss():
         requires_grad=True,
     )
 
+    left_object_score_logits = torch.tensor(
+        [[0.0]],
+        requires_grad=True,
+    )
+
+    right_object_score_logits = torch.tensor(
+        [[0.0]],
+        requires_grad=True,
+    )
+
     model_output = {
         "left": {
             "high_res_masks": left_logits,
             "ious": left_predicted_ious,
+            "object_score_logits": left_object_score_logits,
         },
         "right": {
             "high_res_masks": right_logits,
             "ious": right_predicted_ious,
+            "object_score_logits": right_object_score_logits,
         },
     }
 
@@ -128,12 +170,14 @@ def check_dual_hand_loss():
         "bce",
         "dice",
         "iou",
+        "object_score",
     }
 
     assert set(loss_details["right"].keys()) == {
         "bce",
         "dice",
         "iou",
+        "object_score",
     }
 
     # 分别计算左右分支，用来检查 dual_hand_loss
@@ -165,14 +209,19 @@ def check_dual_hand_loss():
 
     assert left_predicted_ious.grad is not None
     assert right_predicted_ious.grad is not None
+    assert left_object_score_logits.grad is not None
+    assert right_object_score_logits.grad is not None
 
     assert torch.isfinite(left_logits.grad).all().item()
     assert torch.isfinite(right_logits.grad).all().item()
+    assert torch.isfinite(left_object_score_logits.grad).all().item()
+    assert torch.isfinite(right_object_score_logits.grad).all().item()
 
 
 def main():
     check_dice_loss()
     check_iou_target()
+    check_object_score_loss()
     check_dual_hand_loss()
 
     print("SAM2Modified dual-hand losses: OK")
