@@ -60,6 +60,7 @@ def parse_args() -> argparse.Namespace:
 
     # Adapter Config
     parser.add_argument("--use-image-adapter", action="store_true")
+    parser.add_argument("--use-decoder-adapter", action="store_true")
     parser.add_argument("--adapter-dim", type=int, default=64)
     parser.add_argument("--adapter-dropout", type=float, default=0.1)
     parser.add_argument("--adapter-init-scale", type=float, default=1e-3)
@@ -100,6 +101,7 @@ def configure_model(
         mode="train",
         image_size=args.image_size,
         use_image_adapter=args.use_image_adapter,
+        use_decoder_adapter=args.use_decoder_adapter,
         adapter_dim=args.adapter_dim,
         adapter_dropout=args.adapter_dropout,
         adapter_init_scale=args.adapter_init_scale,
@@ -130,7 +132,7 @@ def main() -> None:
     if args.channels_last and device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
     
-    configure_finetune_stage(model)
+    configure_finetune_stage(model, args.use_decoder_adapter)
 
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and args.amp)
     optimizer = build_optimizer(args, model)

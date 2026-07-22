@@ -79,3 +79,80 @@ def iter_image_encoder_adapters(
 
         if adapter is not None:
             yield adapter
+
+def inject_mask_decoder_adapters(
+    model: nn.Module,
+    adapter_dim: int = 64,
+    adapter_dropout: float = 0.1,
+    adapter_init_scale: float = 1e-3,
+) -> int:
+    """
+    在左右 MaskDecoder 的每个 TwoWayAttentionBlock 后，
+    向 query token 注入独立的 ResidualAdapter。
+
+    SAM2 Tiny 每个 MaskDecoder 有两个 Transformer block，
+    因此左右两个 decoder 一共注入四个 Adapter。
+    """
+    injected = 0
+
+    for decoder in (model.left_mask_decoder, model.right_mask_decoder):
+        hidden_dim = decoder.transformer.embedding_dim
+
+        for layer in decoder.transformer.layers:
+            if getattr(layer, "_decoder_adapter_injected", False):
+                continue
+
+            reference_parameter = next(layer.parameters(), None)
+            adapter = ResidualAdapter(
+                hidden_dim=hidden_dim,
+                adapter_dim=adapter_dim,
+                dropout=adapter_dropout,
+                init_scale=adapter_init_scale,
+            )
+
+            if reference_parameter is not None:
+                adapter = adapter.to(device=reference_parameter.device, dtype=reference_parameter.dtype)
+
+            # 赋值给 layer 后，Adapter 会自动注册进 state_dict。
+            layer.decoder_adapter = adapter
+
+            # 保存原始 TwoWayAttentionBlock.forward。
+            layer._forward_without_decoder_adapter = layer.forward
+
+            def _forward_with_decoder_adapter(
+                self: nn.Module,
+                queries: torch.Tensor,
+                keys: torch.Tensor,
+                query_pe: torch.Tensor,
+                key_pe: torch.Tensor,
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                queries, keys = (
+                    self._forward_without_decoder_adapter(
+                        queries=queries,
+                        keys=keys,
+                        query_pe=query_pe,
+                        key_pe=key_pe,
+                    )
+                )
+
+                # 只适配少量 query token。
+                queries = self.decoder_adapter(queries)
+
+                return queries, keys
+
+            layer.forward = types.MethodType(_forward_with_decoder_adapter, layer)
+
+            layer._decoder_adapter_injected = True
+            injected += 1
+
+    return injected
+
+def iter_mask_decoder_adapters(
+    model: nn.Module,
+) -> Iterator[ResidualAdapter]:
+    for decoder in (model.left_mask_decoder, model.right_mask_decoder):
+        for layer in decoder.transformer.layers:
+            adapter = getattr(layer, "decoder_adapter", None)
+
+            if adapter is not None:
+                yield adapter

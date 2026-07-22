@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+import logging
 
 from sam2.modeling.backbones.hieradet import Hiera
 from sam2.modeling.backbones.image_encoder import FpnNeck, ImageEncoder
@@ -24,7 +25,9 @@ from training.utils.sam2_modified_checkpoint import (
 
 from training.model.adapter import (
     inject_image_encoder_adapters,
+    inject_mask_decoder_adapters,
     iter_image_encoder_adapters,
+    iter_mask_decoder_adapters,
 )
 
 
@@ -34,6 +37,7 @@ def build_sam2_modified_tiny(
     mode="eval",
     image_size=1024,
     use_image_adapter=False,
+    use_decoder_adapter=False,
     adapter_dim=64,
     adapter_dropout=0.1,
     adapter_init_scale=1e-3,
@@ -285,6 +289,19 @@ def build_sam2_modified_tiny(
         if adapter_count == 0:
             raise RuntimeError("没有向 Image Encoder 注入任何 Adapter")
 
+    # 6.2 插入 mask_decoder的adapter
+    if use_decoder_adapter:
+        adapter_count = inject_mask_decoder_adapters(
+            model,
+            adapter_dim=adapter_dim,
+            adapter_dropout=adapter_dropout,
+            adapter_init_scale=adapter_init_scale,
+        )
+
+        if adapter_count == 0:
+            raise RuntimeError(
+                "没有向 Mask Decoder 注入任何 Adapter"
+            )
 
 
     # 7. 把模型移动到CPU或GPU
@@ -299,17 +316,53 @@ def build_sam2_modified_tiny(
     return model
 
 def configure_finetune_stage(
-        model: torch.nn.Module,
+    model: torch.nn.Module,
+    use_decoder_adapter: bool = False,
 ) -> None:
     """
-    冻结整个模型，只训练左右手 MaskDecoder 和 Image Encoder Adapter。
+    冻结模型主体，训练左右 MaskDecoder。
+
+    使用 Decoder Adapter 时：
+    - 冻结原始 TwoWayTransformer
+    - 训练 Transformer 内的 Adapter
+    - MaskDecoder 其他部分保持训练
     """
+    image_adapters = list(iter_image_encoder_adapters(model))
+    decoder_adapters = list(iter_mask_decoder_adapters(model))
 
     model.requires_grad_(False)
-
     model.left_mask_decoder.requires_grad_(True)
     model.right_mask_decoder.requires_grad_(True)
 
-    for adapter in iter_image_encoder_adapters(model):
+    if use_decoder_adapter:
+        if not decoder_adapters:
+            raise RuntimeError("启用了 Decoder Adapter，但模型中没有找到 Adapter")
+
+        model.left_mask_decoder.transformer.requires_grad_(False)
+        model.right_mask_decoder.transformer.requires_grad_(False)
+
+        for adapter in decoder_adapters:
+            adapter.requires_grad_(True)
+
+    for adapter in image_adapters:
         adapter.requires_grad_(True)
 
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    adapter_params = sum(
+        p.numel()
+        for adapter in image_adapters + decoder_adapters
+        for p in adapter.parameters()
+        if p.requires_grad
+    )
+    other_params = trainable_params - adapter_params
+
+    logging.info(
+        "Finetune parameters | total=%s | trainable=%s (%.2f%%) | "
+        "adapter=%s | other=%s",
+        f"{total_params:,}",
+        f"{trainable_params:,}",
+        100.0 * trainable_params / total_params,
+        f"{adapter_params:,}",
+        f"{other_params:,}",
+    )
