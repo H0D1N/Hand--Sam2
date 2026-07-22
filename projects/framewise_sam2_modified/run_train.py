@@ -59,6 +59,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-stop-min-delta", type=float, default=1e-4)
 
     # Adapter Config
+    parser.add_argument("--use-image-adapter", action="store_true")
     parser.add_argument("--adapter-dim", type=int, default=64)
     parser.add_argument("--adapter-dropout", type=float, default=0.1)
     parser.add_argument("--adapter-init-scale", type=float, default=1e-3)
@@ -98,6 +99,10 @@ def configure_model(
         device=args.device,
         mode="train",
         image_size=args.image_size,
+        use_image_adapter=args.use_image_adapter,
+        adapter_dim=args.adapter_dim,
+        adapter_dropout=args.adapter_dropout,
+        adapter_init_scale=args.adapter_init_scale,
     )
 
     logging.info(
