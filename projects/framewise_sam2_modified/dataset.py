@@ -144,7 +144,17 @@ class MultiServerDualHandDataset(Dataset):
             }
 
             # 获得序列列表
-            local_dataset_root = self.dataset_root / "sources" / dataset_name
+            configured_root = Path(
+                dataset_config.get(
+                    "data_root",
+                    f"sources/{dataset_name}",
+                )
+            )
+
+            if configured_root.is_absolute():
+                local_dataset_root = configured_root
+            else:
+                local_dataset_root = self.dataset_root / configured_root
 
             if not local_dataset_root.is_dir():
                 raise FileNotFoundError(f"本地数据集目录不存在: {local_dataset_root}")
@@ -223,9 +233,11 @@ class MultiServerDualHandDataset(Dataset):
 
                         sample_index = len(self.samples)
 
+                        relative_image_path = image_path.relative_to(
+                            sequence_dir.parent
+                        )
                         sample_id = (
-                            image_path
-                            .relative_to(self.dataset_root / "sources")
+                            (Path(dataset_name) / relative_image_path)
                             .with_suffix("")
                             .as_posix()
                             .replace("/", "__")
