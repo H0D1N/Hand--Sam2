@@ -139,8 +139,8 @@ class MultiServerDualHandDataset(Dataset):
             dataset_config = dataset_config_by_name[dataset_name]
 
             self.mask_values[dataset_name] = {
-                "left": dataset_config["mask_values"]["left"][0],
-                "right": dataset_config["mask_values"]["right"][0],
+                "left": dataset_config["mask_values"]["left"],
+                "right": dataset_config["mask_values"]["right"],
             }
 
             # 获得序列列表
