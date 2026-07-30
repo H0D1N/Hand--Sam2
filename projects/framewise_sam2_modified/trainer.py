@@ -29,6 +29,8 @@ def run_training_epoch(
     loss_sums = {"loss": 0.0}
     total_samples = 0
     amp_enabled = device.type == "cuda" and args.amp
+    num_steps = len(loader)
+    grad_accum_steps = args.grad_accum_steps
 
     optimizer.zero_grad(set_to_none=True)
 
@@ -62,13 +64,20 @@ def run_training_epoch(
         if not torch.isfinite(total_loss).item():
             raise FloatingPointError(f"Epoch {epoch + 1}, step {step}: "f"loss={total_loss.detach().item()}")
 
-        loss_for_backward = (total_loss / args.grad_accum_steps)
+        # 完整累积组按 grad_accum_steps 平均
+        # 最后不足一组时按实际小批次数平均，避免最后一次参数更新的梯度偏小。
+        
+            # 当前梯度累积组从哪个 step 开始，step 从 1 开始计数。
+        group_start = ((step - 1) // grad_accum_steps) * grad_accum_steps
+        current_group_size = min(grad_accum_steps, num_steps - group_start)
+
+        loss_for_backward = total_loss / current_group_size
 
         scaler.scale(loss_for_backward).backward()
 
         if (
             step % args.grad_accum_steps == 0
-            or step == len(loader)
+            or step == num_steps
         ):
             scaler.step(optimizer)
             scaler.update()

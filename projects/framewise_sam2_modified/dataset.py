@@ -466,6 +466,8 @@ def build_dataloaders(
         "num_workers": args.num_workers,
         "pin_memory": device.type == "cuda",
         "collate_fn": collate_batch,
+        # 丢弃不足 batch_size 的 batch，保证每次前向/反向使用相同数量的样本。
+        "drop_last": True,
     }
 
     val_loader_kwargs: dict[str, object] = {
@@ -475,6 +477,8 @@ def build_dataloaders(
         "num_workers": args.num_workers,
         "pin_memory": device.type == "cuda",
         "collate_fn": collate_batch,
+        # 验证保留尾批，确保所有样本都参与指标计算。
+        "drop_last": False,
     }
 
     if args.num_workers > 0:
