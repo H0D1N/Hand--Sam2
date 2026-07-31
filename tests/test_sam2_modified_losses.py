@@ -97,6 +97,62 @@ def check_object_score_loss():
     assert good_loss.item() < bad_loss.item()
 
 
+def check_empty_gt_loss():
+    target_masks = torch.zeros(
+        (2, 1, 2, 2),
+        dtype=torch.float32,
+    )
+
+    mask_logits = torch.zeros_like(
+        target_masks,
+        requires_grad=True,
+    )
+    predicted_ious = torch.tensor(
+        [[0.5], [0.5]],
+        requires_grad=True,
+    )
+    object_score_logits = torch.tensor(
+        [[0.0], [0.0]],
+        requires_grad=True,
+    )
+
+    hand_outputs = {
+        "high_res_masks": mask_logits,
+        "ious": predicted_ious,
+        "object_score_logits": object_score_logits,
+    }
+
+    total_loss, loss_details = one_hand_loss(
+        hand_outputs=hand_outputs,
+        target_masks=target_masks,
+        bce_weight=1.0,
+        dice_weight=1.0,
+        iou_weight=1.0,
+        object_score_weight=1.0,
+    )
+
+    zero = torch.zeros((), dtype=total_loss.dtype)
+
+    assert torch.allclose(loss_details["bce"], zero)
+    assert torch.allclose(loss_details["dice"], zero)
+    assert torch.allclose(loss_details["iou"], zero)
+    assert loss_details["object_score"].item() > 0.0
+    assert torch.allclose(
+        total_loss,
+        loss_details["object_score"],
+    )
+
+    total_loss.backward()
+
+    assert mask_logits.grad is not None
+    assert predicted_ious.grad is not None
+    assert object_score_logits.grad is not None
+
+    assert torch.count_nonzero(mask_logits.grad).item() == 0
+    assert torch.count_nonzero(predicted_ious.grad).item() == 0
+    assert torch.count_nonzero(object_score_logits.grad).item() > 0
+
+
 def check_dual_hand_loss():
     left_masks = torch.tensor(
         [[[[1.0, 0.0],
@@ -222,6 +278,7 @@ def main():
     check_dice_loss()
     check_iou_target()
     check_object_score_loss()
+    check_empty_gt_loss()
     check_dual_hand_loss()
 
     print("SAM2Modified dual-hand losses: OK")

@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 from pathlib import Path
 
-from .losses import dual_hand_loss, iou_target_from_logits
+from .losses import dual_hand_loss, iou_target_from_logits, object_targets_from_masks
 from .utils import save_dual_hand_visualization, upsample_logits
 
 LOSS_NAMES = ("bce", "dice", "iou", "object_score")
@@ -143,6 +143,11 @@ def run_validation_epoch(
     total_samples = 0
     total_foreground_hands = 0
 
+    object_tp = 0
+    object_tn = 0
+    object_fp = 0
+    object_fn = 0
+
     vis_dir = (
         Path(args.output_dir)
         / "visualizations"
@@ -183,6 +188,21 @@ def run_validation_epoch(
         total_loss += loss.item() * batch_size
         total_samples += batch_size
 
+        gt_present = torch.cat((
+            object_targets_from_masks(left_masks),
+            object_targets_from_masks(right_masks),
+        ))
+        pred_present = torch.cat((
+            outputs["left"]["object_score_logits"].reshape(-1) > 0,
+            outputs["right"]["object_score_logits"].reshape(-1) > 0,
+        ))
+
+        object_tp += (pred_present & gt_present).sum().item()
+        object_tn += (~pred_present & ~gt_present).sum().item()
+        object_fp += (pred_present & ~gt_present).sum().item()
+        object_fn += (~pred_present & gt_present).sum().item()
+
+        # 可视化与可视化准备；具体计算左右手的iou& dice
         for sample_index in range(batch_size):
             original_left_mask = batch["original_left_mask"][sample_index].unsqueeze(0).to(device)
             original_right_mask = batch["original_right_mask"][sample_index].unsqueeze(0).to(device)
@@ -232,8 +252,21 @@ def run_validation_epoch(
                 total_dice / total_foreground_hands,
             )
 
+    object_total = object_tp + object_tn + object_fp + object_fn
+    object_accuracy = (object_tp + object_tn) / max(object_total, 1)
+    object_precision = object_tp / max(object_tp + object_fp, 1)
+    object_recall = object_tp / max(object_tp + object_fn, 1)
+    object_f1 = (
+        2.0 * object_precision * object_recall
+        / max(object_precision + object_recall, 1e-8)
+    )
+
     return {
         "loss": total_loss / total_samples,
         "iou": total_iou / total_foreground_hands,
         "dice": total_dice / total_foreground_hands,
+        "object_accuracy": object_accuracy,
+        "object_precision": object_precision,
+        "object_recall": object_recall,
+        "object_f1": object_f1,
     }

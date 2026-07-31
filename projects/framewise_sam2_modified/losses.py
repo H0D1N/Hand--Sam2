@@ -4,19 +4,41 @@ import torch.nn.functional as F
 
 
 
+def object_targets_from_masks(
+    target_masks: torch.Tensor,
+) -> torch.Tensor:
+    """
+    根据每张 GT mask 是否非空，返回 [B] bool。
+
+    Output: tensor([True, False, True, ...])
+    """
+    return target_masks.gt(0.5).flatten(1).any(dim=1)
+
+def masked_batch_mean(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """
+    只保留 mask=True 样本的 loss，然后按整个 batch 平均。
+    达到 GT 为空，只计算 obj_loss , 有值时再计算 dice_loss...
+    """
+    return (values * mask.to(values.dtype)).mean()
+
 def dice_loss_from_logits(
     logits: torch.Tensor, 
     targets: torch.Tensor, 
+    reduction: str = "mean",
 ) -> torch.Tensor:
     """
-    计算dice_loss
+    计算每张图片各自的 Dice loss，返回 [B] 或 []
 
     input:
         logits: [B, 1, H(768), W(768)] 
         targets:[B, 1, H(768), W(768)] 每个点为： 0.0， 1.0
 
     output: 
-    [] 大小的 tensor
+    reduction=none: [B] 大小的 tensor
+    reduction=mean: [] 大小的 tensor
     """
 
     probs = torch.sigmoid(logits) # probs: [B, 1, H(768), W(768)] 每个点在 0-1 之间
@@ -27,6 +49,9 @@ def dice_loss_from_logits(
     
     dice = (2.0 * intersection + 1e-6) / (total_area + 1e-6)
     dice_loss = 1.0 - dice
+
+    if reduction == "none":
+        return dice_loss
     return dice_loss.mean()
 
 def iou_target_from_logits(
@@ -54,13 +79,9 @@ def object_score_loss_from_logits(
     target_masks: [B, 1, H, W]
     """
 
-    object_exists = (
+    object_exists = object_targets_from_masks(
         target_masks
-        .flatten(start_dim=1)
-        .amax(dim=1)
-        .gt(0.5)
-        .to(dtype=object_score_logits.dtype)
-    )
+    ).to(object_score_logits.dtype)
 
     return F.binary_cross_entropy_with_logits(
         object_score_logits.reshape(-1),
@@ -101,15 +122,36 @@ def one_hand_loss(
     predicted_ious = hand_outputs["ious"]
     target_masks = target_masks.float()
 
-    # 计算dice_loss和 bce_loss
-    bce_loss = F.binary_cross_entropy_with_logits(logits, target_masks)
-    dice_loss = dice_loss_from_logits(logits, target_masks)
+    # 计算每张图片的dice_loss和 bce_loss：[B] 大小
+    bce_per_sample = F.binary_cross_entropy_with_logits(
+        logits,
+        target_masks,
+        reduction="none",
+    ).mean(dim=(1, 2, 3))
 
-    # 计算iou_loss: 模型对iou的预测
+    dice_per_sample = dice_loss_from_logits(
+        logits,
+        target_masks,
+        reduction="none",
+    )
+
+    # 计算每张图片的iou_loss: 模型对iou的预测： [B]
     target_ious = iou_target_from_logits(logits.detach(), target_masks)
-    iou_loss = F.mse_loss(predicted_ious.view(-1), target_ious.view(-1))
+    iou_per_sample = F.mse_loss(
+        predicted_ious.view(-1),
+        target_ious.view(-1),
+        reduction="none",
+    )
 
-    # 计算 object_score_loss
+    # tensor([True, False, True, ...])
+    # GT 为空时，不计算 mask、Dice 和 IoU loss
+    object_targets = object_targets_from_masks(target_masks)
+
+    bce_loss = masked_batch_mean(bce_per_sample, object_targets)
+    dice_loss = masked_batch_mean(dice_per_sample, object_targets)
+    iou_loss = masked_batch_mean(iou_per_sample, object_targets)
+
+    # Object score 无论 GT 是否为空都需要训练
     object_score_loss = object_score_loss_from_logits(
         object_score_logits=hand_outputs["object_score_logits"],
         target_masks=target_masks,

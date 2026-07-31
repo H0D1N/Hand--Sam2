@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bce-weight", type=float, default=1.0)
     parser.add_argument("--dice-weight", type=float, default=1.0)
     parser.add_argument("--iou-weight", type=float, default=0.1)
-    parser.add_argument("--object-score-weight", type=float, default=0)
+    parser.add_argument("--object-score-weight", type=float, default=1.0)
 
     # Optimizer & Scheduler
     parser.add_argument("--optimizer", type=str, choices=["adam", "adamw", "radam"], default="adamw")
@@ -165,17 +165,27 @@ def main() -> None:
 
             logging.info(
                 "VALIDATION | epoch=%d | "
-                "val_loss=%.4f | val_iou=%.4f | val_dice=%.4f",
+                "val_loss=%.4f | val_iou=%.4f | val_dice=%.4f | "
+                "obj_acc=%.4f | obj_precision=%.4f | "
+                "obj_recall=%.4f | obj_f1=%.4f",
                 epoch + 1,
                 val_metrics["loss"],
                 val_metrics["iou"],
                 val_metrics["dice"],
+                val_metrics["object_accuracy"],
+                val_metrics["object_precision"],
+                val_metrics["object_recall"],
+                val_metrics["object_f1"],
             )
         else:
             val_metrics = {
                 "loss": float("nan"),
                 "iou": float("nan"),
                 "dice": float("nan"),
+                "object_accuracy": float("nan"),
+                "object_precision": float("nan"),
+                "object_recall": float("nan"),
+                "object_f1": float("nan"),
             }
 
         current_lr = float(optimizer.param_groups[0]["lr"])
@@ -187,6 +197,10 @@ def main() -> None:
             "val_loss": float(val_metrics["loss"]),
             "val_iou": float(val_metrics["iou"]),
             "val_dice": float(val_metrics["dice"]),
+            "val_object_accuracy": float(val_metrics["object_accuracy"]),
+            "val_object_precision": float(val_metrics["object_precision"]),
+            "val_object_recall": float(val_metrics["object_recall"]),
+            "val_object_f1": float(val_metrics["object_f1"]),
         }
 
         history.append(epoch_metrics)
@@ -286,4 +300,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
