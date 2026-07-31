@@ -35,7 +35,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--disable-augmentation", action="store_true")
-
+    parser.add_argument("--multimask-output", action="store_true")
+    
     # dataset
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--frames-per-second", type=float, default=2.0)

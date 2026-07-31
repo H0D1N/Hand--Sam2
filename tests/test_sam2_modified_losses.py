@@ -60,11 +60,11 @@ def check_iou_target():
         targets,
     )
 
-    assert tuple(target_ious.shape) == (1,)
+    assert tuple(target_ious.shape) == (1, 1)
 
     assert torch.allclose(
         target_ious,
-        torch.ones(1),
+        torch.ones_like(target_ious),
     )
 
 
@@ -118,6 +118,7 @@ def check_empty_gt_loss():
 
     hand_outputs = {
         "high_res_masks": mask_logits,
+        "high_res_multimasks": mask_logits,
         "ious": predicted_ious,
         "object_score_logits": object_score_logits,
     }
@@ -195,11 +196,13 @@ def check_dual_hand_loss():
     model_output = {
         "left": {
             "high_res_masks": left_logits,
+            "high_res_multimasks": left_logits,
             "ious": left_predicted_ious,
             "object_score_logits": left_object_score_logits,
         },
         "right": {
             "high_res_masks": right_logits,
+            "high_res_multimasks": right_logits,
             "ious": right_predicted_ious,
             "object_score_logits": right_object_score_logits,
         },
@@ -274,12 +277,89 @@ def check_dual_hand_loss():
     assert torch.isfinite(right_object_score_logits.grad).all().item()
 
 
+def check_multimask_matching():
+    target_masks = torch.tensor(
+        [[[[1.0, 0.0],
+           [0.0, 1.0]]]]
+    )
+
+    # 前两个候选各自只包含一块可见区域，
+    # 第三个候选同时包含两块，应当被 GT 匹配选中。
+    multimask_logits = torch.tensor(
+        [[
+            [[8.0, -8.0],
+             [-8.0, -8.0]],
+
+            [[-8.0, -8.0],
+             [-8.0, 8.0]],
+
+            [[8.0, -8.0],
+             [-8.0, 8.0]],
+        ]],
+        requires_grad=True,
+    )
+
+    dice_per_candidate = dice_loss_from_logits(
+        multimask_logits,
+        target_masks,
+        reduction="none",
+    )
+
+    assert tuple(dice_per_candidate.shape) == (1, 3)
+    assert dice_per_candidate.argmin(dim=1).item() == 2
+
+    predicted_ious = torch.tensor(
+        [[0.25, 0.25, 0.25]],
+        requires_grad=True,
+    )
+    object_score_logits = torch.tensor(
+        [[5.0]],
+        requires_grad=True,
+    )
+
+    hand_outputs = {
+        # 当前推理会在 predicted IoU 相同时选择第一个候选。
+        "high_res_masks": multimask_logits[:, :1],
+        "high_res_multimasks": multimask_logits,
+        "ious": predicted_ious,
+        "object_score_logits": object_score_logits,
+    }
+
+    total_loss, _ = one_hand_loss(
+        hand_outputs=hand_outputs,
+        target_masks=target_masks,
+        bce_weight=1.0,
+        dice_weight=1.0,
+        iou_weight=1.0,
+        object_score_weight=1.0,
+    )
+
+    total_loss.backward()
+
+    candidate_gradients = (
+        multimask_logits.grad
+        .abs()
+        .sum(dim=(-2, -1))
+    )
+
+    # Mask 和 Dice loss 只反向传播到完整候选。
+    assert candidate_gradients[0, 0].item() == 0.0
+    assert candidate_gradients[0, 1].item() == 0.0
+    assert candidate_gradients[0, 2].item() > 0.0
+
+    # IoU loss 监督全部三个候选。
+    assert torch.count_nonzero(
+        predicted_ious.grad
+    ).item() == 3
+
+
 def main():
     check_dice_loss()
     check_iou_target()
     check_object_score_loss()
     check_empty_gt_loss()
     check_dual_hand_loss()
+    check_multimask_matching()
 
     print("SAM2Modified dual-hand losses: OK")
 

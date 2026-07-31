@@ -49,7 +49,7 @@ def run_training_epoch(
                 images=images,
                 point_inputs=None,
                 mask_inputs=None,
-                multimask_output=False,
+                multimask_output=args.multimask_output,
             )
             total_loss, loss_details = dual_hand_loss(
                 model_output=outputs,
@@ -171,7 +171,7 @@ def run_validation_epoch(
             images=images,
             point_inputs=None,
             mask_inputs=None,
-            multimask_output=False,
+            multimask_output=args.multimask_output,
         )
 
         loss, _ = dual_hand_loss(
