@@ -160,8 +160,8 @@ class MultiServerDualHandDataset(Dataset):
                 raise FileNotFoundError(f"本地数据集目录不存在: {local_dataset_root}")
 
             sequence_dirs = sorted([
-                path for path in local_dataset_root.iterdir()
-                if path.is_dir() and path.match(dataset_config["sequence_glob"])
+                path for path in local_dataset_root.glob(dataset_config["sequence_glob"])
+                if path.is_dir()
             ])
 
             if len(sequence_dirs) <= test_seq_count:
