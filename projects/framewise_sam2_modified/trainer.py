@@ -134,6 +134,7 @@ def run_validation_epoch(
         device: torch.device,
         epoch: int,
         args: argparse.Namespace,
+        visualization_fn=save_dual_hand_visualization,
 ) -> dict[str, float]:
     model.eval()
 
@@ -230,7 +231,7 @@ def run_validation_epoch(
                 total_foreground_hands += 1
 
             if not args.skip_visualizations and num_vis_saved < max_vis_to_save:
-                save_dual_hand_visualization(
+                visualization_fn(
                     original_image=batch["original_image"][sample_index],
                     left_pred_mask=(left_logits > 0).float(),
                     right_pred_mask=(right_logits > 0).float(),

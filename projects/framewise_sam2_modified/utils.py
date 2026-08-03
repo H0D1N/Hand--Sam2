@@ -65,6 +65,53 @@ def save_dual_hand_visualization(
     Image.fromarray(concat_image).save(save_path)
 
 
+def save_dual_hand_five_panel_visualization(
+        original_image: torch.Tensor,
+        left_pred_mask: torch.Tensor,
+        right_pred_mask: torch.Tensor,
+        left_gt_mask: torch.Tensor,
+        right_gt_mask: torch.Tensor,
+        save_path: Path,
+) -> None:
+    """保存原图、左右手 GT 和左右手预测五栏可视化。"""
+    image = (
+        original_image.detach().cpu().numpy()
+        .transpose(1, 2, 0)
+        .astype(np.uint8)
+    )
+
+    left_pred = left_pred_mask.detach().squeeze().cpu().numpy() > 0.5
+    right_pred = right_pred_mask.detach().squeeze().cpu().numpy() > 0.5
+    left_gt = left_gt_mask.detach().squeeze().cpu().numpy() > 0.5
+    right_gt = right_gt_mask.detach().squeeze().cpu().numpy() > 0.5
+
+    left_color = np.array([255, 0, 0], dtype=np.float32)
+    right_color = np.array([0, 0, 255], dtype=np.float32)
+    alpha = 0.5
+
+    def overlay(mask: np.ndarray, color: np.ndarray) -> np.ndarray:
+        panel = image.copy()
+        panel[mask] = (
+            panel[mask] * (1.0 - alpha)
+            + color * alpha
+        ).astype(np.uint8)
+        return panel
+
+    concat_image = np.concatenate(
+        [
+            image,
+            overlay(left_gt, left_color),
+            overlay(left_pred, left_color),
+            overlay(right_gt, right_color),
+            overlay(right_pred, right_color),
+        ],
+        axis=1,
+    )
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(concat_image).save(save_path)
+
+
 def save_checkpoint(
         output_path: str | Path,
         model: torch.nn.Module,
@@ -235,4 +282,3 @@ def configure_runtime(device: torch.device, use_tf32: bool, channels_last: bool 
         torch.backends.cudnn.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
     torch.backends.cudnn.benchmark = True
-
