@@ -12,6 +12,59 @@ def upsample_logits(logits: torch.Tensor, size: tuple[int, int]) -> torch.Tensor
     return F.interpolate(logits, size=size, mode="bilinear", align_corners=False)
 
 
+def make_dual_hand_tensorboard_image(
+        normalized_image: torch.Tensor,
+        left_pred_mask: torch.Tensor,
+        right_pred_mask: torch.Tensor,
+        left_gt_mask: torch.Tensor,
+        right_gt_mask: torch.Tensor,
+        output_size: int = 384,
+) -> torch.Tensor:
+    """生成 TensorBoard 使用的“原图 | 双手 GT | 双手预测”三栏图。"""
+    image = normalized_image.detach().float()
+    mean = image.new_tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = image.new_tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    image = (image * std + mean).clamp(0, 1)
+
+    left_color = image.new_tensor([1.0, 0.0, 0.0]).view(3, 1, 1)
+    right_color = image.new_tensor([0.0, 0.0, 1.0]).view(3, 1, 1)
+
+    def overlay(
+            base_image: torch.Tensor,
+            left_mask: torch.Tensor,
+            right_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        result = base_image.clone()
+        left_mask = left_mask.detach().squeeze().bool().unsqueeze(0)
+        right_mask = right_mask.detach().squeeze().bool().unsqueeze(0)
+
+        result = torch.where(
+            left_mask,
+            result * 0.5 + left_color * 0.5,
+            result,
+        )
+        result = torch.where(
+            right_mask,
+            result * 0.5 + right_color * 0.5,
+            result,
+        )
+        return result
+
+    gt_image = overlay(image, left_gt_mask, right_gt_mask)
+    pred_image = overlay(image, left_pred_mask, right_pred_mask)
+    summary_image = torch.cat([image, gt_image, pred_image], dim=-1)
+
+    if output_size > 0 and summary_image.shape[-2] != output_size:
+        summary_image = F.interpolate(
+            summary_image.unsqueeze(0),
+            size=(output_size, output_size * 3),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
+
+    return summary_image.cpu()
+
+
 def save_dual_hand_visualization(
         original_image: torch.Tensor,
         left_pred_mask: torch.Tensor,
