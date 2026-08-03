@@ -154,8 +154,8 @@ def run_validation_epoch(
         / "visualizations"
         / f"val_epoch_{epoch + 1}"
     )
-    num_vis_saved = 0
-    max_vis_to_save = 200
+    num_vis_saved_by_dataset: dict[str, int] = {}
+    max_vis_per_dataset = 100
 
     if not args.skip_visualizations:
         vis_dir.mkdir(parents=True, exist_ok=True)
@@ -243,7 +243,13 @@ def run_validation_epoch(
                 total_dice += right_dice.item()
                 total_foreground_hands += 1
 
-            if not args.skip_visualizations and num_vis_saved < max_vis_to_save:
+            dataset_name = batch["dataset_name"][sample_index]
+            num_vis_saved = num_vis_saved_by_dataset.get(dataset_name, 0)
+
+            if (
+                not args.skip_visualizations
+                and num_vis_saved < max_vis_per_dataset
+            ):
                 visualization_fn(
                     original_image=batch["original_image"][sample_index],
                     left_pred_mask=(left_logits > 0).float(),
@@ -252,7 +258,7 @@ def run_validation_epoch(
                     right_gt_mask=original_right_mask,
                     save_path=vis_dir / f"{batch['sample_id'][sample_index]}.png",
                 )
-                num_vis_saved += 1
+                num_vis_saved_by_dataset[dataset_name] = num_vis_saved + 1
 
         if step % max(args.log_interval, 1) == 0 or step == len(loader):
             logging.info(
