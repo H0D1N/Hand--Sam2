@@ -4,7 +4,7 @@ import logging
 
 import torch
 
-from .dataset import build_dataloaders
+from .dataset import build_dataloaders, build_center_point_prompt
 from .run_train import configure_model, parse_args
 from .trainer import run_validation_epoch
 from .utils import (
@@ -47,6 +47,7 @@ def main() -> None:
         epoch=0,
         args=args,
         visualization_fn=save_dual_hand_five_panel_visualization,
+        point_prompt_fn=build_center_point_prompt,
     )
     epoch_metrics = {
         "epoch": 0.0,

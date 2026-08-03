@@ -47,7 +47,6 @@ def run_training_epoch(
         with context:
             outputs = model.forward_single_image(
                 images=images,
-                point_inputs=None,
                 mask_inputs=None,
                 multimask_output=args.multimask_output,
             )
@@ -135,6 +134,7 @@ def run_validation_epoch(
         epoch: int,
         args: argparse.Namespace,
         visualization_fn=save_dual_hand_visualization,
+        point_prompt_fn=None,
 ) -> dict[str, float]:
     model.eval()
 
@@ -168,9 +168,22 @@ def run_validation_epoch(
         if args.channels_last and device.type == "cuda":
             images = images.contiguous(memory_format=torch.channels_last)
 
+        left_point_inputs = (
+            point_prompt_fn(left_masks)
+            if point_prompt_fn is not None
+            else None
+        )
+
+        right_point_inputs = (
+            point_prompt_fn(right_masks)
+            if point_prompt_fn is not None
+            else None
+        )
+
         outputs = model.forward_single_image(
             images=images,
-            point_inputs=None,
+            left_point_inputs=left_point_inputs,
+            right_point_inputs=right_point_inputs,
             mask_inputs=None,
             multimask_output=args.multimask_output,
         )

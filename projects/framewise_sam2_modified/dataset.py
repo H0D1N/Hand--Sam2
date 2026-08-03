@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import functional as TF
 
 from .frame_sampler import FramesPerSecondSampler
+from sam2.modeling.sam2_utils import get_next_point
 
 try:
     import albumentations as A
@@ -513,3 +514,21 @@ def build_dataloaders(
 
     return train_loader, val_loader, train_sampler
 
+def build_center_point_prompt(
+    masks: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    present = masks.flatten(1).any(dim=1)
+
+    coords, labels = get_next_point(
+        gt_masks=masks.bool(),
+        pred_masks=None,
+        method="center",
+    )
+
+    coords[~present] = 0
+    labels[~present] = -1
+
+    return {
+        "point_coords": coords,
+        "point_labels": labels,
+    }

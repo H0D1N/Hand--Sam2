@@ -182,7 +182,6 @@ def main():
         with torch.inference_mode():
             outputs = model.forward_single_image(
                 images=images,
-                point_inputs=None,
                 mask_inputs=None,
                 multimask_output=multimask_output,
             )

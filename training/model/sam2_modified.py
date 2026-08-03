@@ -183,9 +183,10 @@ class SAM2Modified(SAM2Train):
     def forward_single_image(
         self,
         images,
-        point_inputs=None,
         mask_inputs=None,
         multimask_output=False,
+        left_point_inputs=None,
+        right_point_inputs=None,
     ):
         assert images.dim() == 4
 
@@ -207,7 +208,7 @@ class SAM2Modified(SAM2Train):
             mask_decoder=self.left_mask_decoder,
             prompt_encoder=self.sam_prompt_encoder,
             backbone_features=pix_feat,
-            point_inputs=point_inputs,
+            point_inputs=left_point_inputs,
             mask_inputs=mask_inputs,
             high_res_features=backbone_out["left_high_res_features"],
             multimask_output=multimask_output,
@@ -217,7 +218,7 @@ class SAM2Modified(SAM2Train):
             mask_decoder=self.right_mask_decoder,
             prompt_encoder=self.sam_prompt_encoder,
             backbone_features=pix_feat,
-            point_inputs=point_inputs,
+            point_inputs=right_point_inputs,
             mask_inputs=mask_inputs,
             high_res_features=backbone_out["right_high_res_features"],
             multimask_output=multimask_output,
