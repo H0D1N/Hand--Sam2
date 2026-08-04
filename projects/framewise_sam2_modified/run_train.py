@@ -8,14 +8,11 @@ from typing import Any
 import torch
 from torch.optim import Adam, AdamW, RAdam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.tensorboard import SummaryWriter
 
 from .builder import build_sam2_modified_tiny, configure_finetune_stage
-from .dataset import build_dataloaders
-from .trainer import (
-    log_tensorboard_probe,
-    run_training_epoch,
-    run_validation_epoch,
-)
+from .dataset import build_dataloaders, build_center_point_prompt
+from .trainer import log_tensorboard_probe, run_training_epoch, run_validation_epoch
 from .utils import configure_runtime, dump_json, save_checkpoint, save_training_curves, set_seed
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -41,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--disable-augmentation", action="store_true")
     parser.add_argument("--multimask-output", action="store_true")
+    parser.add_argument("--use-point-prompt", action="store_true")
     
     # dataset
     parser.add_argument("--dataset-root", type=Path, required=True)
@@ -197,7 +195,7 @@ def main() -> None:
 
     
     train_loader, val_loader, train_sampler = build_dataloaders(args, device)
-    
+    point_prompt_fn = (build_center_point_prompt if args.use_point_prompt else None)
     
     model = configure_model(args)
 
@@ -215,13 +213,6 @@ def main() -> None:
     tensorboard_probe = None
 
     if not args.disable_tensorboard:
-        try:
-            from torch.utils.tensorboard import SummaryWriter
-        except ModuleNotFoundError as exc:
-            raise ModuleNotFoundError(
-                "使用 TensorBoard 需要先安装 tensorboard"
-            ) from exc
-
         tensorboard_writer = SummaryWriter(
             log_dir=str(args.output_dir / "tensorboard"),
             max_queue=100,
@@ -250,6 +241,7 @@ def main() -> None:
                 device=device,
                 args=args,
                 global_step=0,
+                point_prompt_fn=point_prompt_fn,
             )
 
         logging.info(
@@ -279,6 +271,7 @@ def main() -> None:
             epoch=epoch,
             tensorboard_writer=tensorboard_writer,
             tensorboard_probe=tensorboard_probe,
+            point_prompt_fn=point_prompt_fn,
         )
 
         logging.info("TRAINING | epoch=%d | train_loss=%.4f", epoch + 1, train_metrics["loss"])
@@ -293,7 +286,7 @@ def main() -> None:
 
         should_validate = ((epoch + 1) % max(args.val_interval, 1) == 0 or epoch == args.epochs - 1)
         if should_validate:
-            val_metrics = run_validation_epoch(model=model, loader=val_loader, device=device, epoch=epoch, args=args)
+            val_metrics = run_validation_epoch(model=model, loader=val_loader, device=device, epoch=epoch, args=args, point_prompt_fn=point_prompt_fn,)
             scheduler.step(val_metrics["loss"])
 
             if tensorboard_writer is not None:

@@ -7,13 +7,8 @@ import torch
 from .dataset import build_dataloaders, build_center_point_prompt
 from .run_train import configure_model, parse_args
 from .trainer import run_validation_epoch
-from .utils import (
-    configure_runtime,
-    dump_json,
-    save_dual_hand_five_panel_visualization,
-    set_seed,
-)
-
+from .utils import configure_runtime, dump_json, set_seed
+from .visualization import save_dual_hand_five_panel_visualization
 
 def main() -> None:
     args = parse_args()
