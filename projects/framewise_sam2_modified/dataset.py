@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, ConcatDataset
 from torchvision.transforms import functional as TF
 
 from .frame_sampler import FramesPerSecondSampler
@@ -571,6 +571,27 @@ class DexYCBDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+class CombinedStreamDataset(ConcatDataset):
+    def __init__(self, datasets):
+        super().__init__(datasets)
+
+        self.streams = {}
+        offset = 0
+
+        for dataset in datasets:
+            for stream_id, stream in dataset.streams.items():
+                if stream_id in self.streams:
+                    raise ValueError(f"重复 stream_id: {stream_id}")
+
+                self.streams[stream_id] = {
+                    **stream,
+                    "sample_indices": [
+                        offset + index
+                        for index in stream["sample_indices"]
+                    ],
+                }
+
+            offset += len(dataset)
 
 def collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """组成 batch，同时把不同尺寸的验证原图保存在列表中。"""
@@ -600,39 +621,60 @@ def build_dataloaders(
         device: torch.device,
 ) -> tuple[DataLoader, DataLoader, FramesPerSecondSampler]:
     """创建训练/验证 Dataset、FPS Sampler 和 DataLoader。"""
-    # train_dataset = MultiServerDualHandDataset(
-    #     dataset_root=args.dataset_root,
-    #     split="train",
-    #     test_seq_count=args.test_seq_count,
-    #     image_size=args.image_size,
-    #     use_augmentation=not args.disable_augmentation,
-    #     dataset_names=args.dataset_names,
-    # )
-
-    # val_dataset = MultiServerDualHandDataset(
-    #     dataset_root=args.dataset_root,
-    #     split="val",
-    #     test_seq_count=args.test_seq_count,
-    #     image_size=args.image_size,
-    #     use_augmentation=False,
-    #     dataset_names=args.dataset_names,
-    # )
-
-    train_dataset = DexYCBDataset(
-        dataset_root=args.dex_ycb_root,
+    train_MultiServer_dataset = MultiServerDualHandDataset(
+        dataset_root=args.dataset_root,
         split="train",
-        setup="s0",
+        test_seq_count=args.test_seq_count,
         image_size=args.image_size,
         use_augmentation=not args.disable_augmentation,
+        dataset_names=args.dataset_names,
     )
 
-    val_dataset = DexYCBDataset(
-        dataset_root=args.dex_ycb_root,
+    val_MultiServer_dataset = MultiServerDualHandDataset(
+        dataset_root=args.dataset_root,
         split="val",
-        setup="s0",
+        test_seq_count=args.test_seq_count,
         image_size=args.image_size,
         use_augmentation=False,
+        dataset_names=args.dataset_names,
     )
+
+    # 默认只使用 MultiServer。
+    train_dataset = train_MultiServer_dataset
+    val_dataset = val_MultiServer_dataset
+
+    if args.mix_datasets:
+        train_dex_ycb_dataset = DexYCBDataset(
+            dataset_root=args.dex_ycb_root,
+            split="train",
+            setup="s0",
+            image_size=args.image_size,
+            use_augmentation=not args.disable_augmentation,
+        )
+
+        val_dex_ycb_dataset = DexYCBDataset(
+            dataset_root=args.dex_ycb_root,
+            split="val",
+            setup="s0",
+            image_size=args.image_size,
+            use_augmentation=False,
+        )
+
+        train_dataset = CombinedStreamDataset([
+            train_MultiServer_dataset,
+            train_dex_ycb_dataset,
+        ])
+
+        val_dataset = CombinedStreamDataset([
+            val_MultiServer_dataset,
+            val_dex_ycb_dataset,
+        ])
+
+        logging.info("Dataset mode: MultiServer + DexYCB")
+    else:
+        logging.info("Dataset mode: MultiServer only")
+
+
 
     train_sampler = FramesPerSecondSampler(
         dataset=train_dataset,

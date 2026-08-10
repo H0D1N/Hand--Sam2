@@ -41,13 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-point-prompt", action="store_true")
     
     # dataset
-    # parser.add_argument("--dataset-root", type=Path, required=True)
+    parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--frames-per-second", type=float, default=2.0)
-    # parser.add_argument("--dataset-names", nargs="+", default=None)
-    # parser.add_argument("--test-seq-count", type=int, default=2)
+    parser.add_argument("--dataset-names", nargs="+", default=None)
+    parser.add_argument("--test-seq-count", type=int, default=2)
 
     # dex-ycb dataset
-    parser.add_argument("--dex_ycb_root", type=Path, required=True)
+    parser.add_argument("--dex_ycb_root", type=Path, default=None)
+    parser.add_argument("--mix-datasets", action="store_true", help="同时使用 MultiServer 和 DexYCB，默认只使用 MultiServer")
 
     # Loss Weights
     parser.add_argument("--bce-weight", type=float, default=1.0)
@@ -90,7 +91,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--tensorboard-log-interval must be >= 1")
     if args.tensorboard_probe_image_size < 1:
         raise ValueError("--tensorboard-probe-image-size must be >= 1")
-
+    if args.mix_datasets and args.dex_ycb_root is None:
+        parser.error("--mix-datasets 需要同时提供 --dex_ycb_root")
     return args
 
 def build_optimizer(args: argparse.Namespace, model: torch.nn.Module) -> torch.optim.Optimizer:
