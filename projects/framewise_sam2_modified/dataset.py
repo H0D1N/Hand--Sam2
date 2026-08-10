@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
-import logging
+
 import cv2
 import numpy as np
 import torch
@@ -393,6 +395,182 @@ class MultiServerDualHandDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+class DexYCBDataset(Dataset):
+    """读取 DexYCB 单手数据，输出左右手两个二值 mask。"""
+
+    def __init__(
+        self,
+        dataset_root: str | Path,
+        split: str = "val",
+        setup: str = "s0",
+        image_size: int = 1024,
+        use_augmentation: bool = False,
+    ) -> None:
+        if split not in {"train", "val"}:
+            raise ValueError(f"split 必须是 train 或 val，当前是 {split!r}")
+
+        self.dataset_root = Path(dataset_root).expanduser().resolve()
+        self.split = split
+        self.image_size = image_size
+        self.dataset_name = "DexYCB"
+        self.streams = {}
+
+        if not self.dataset_root.is_dir():
+            raise FileNotFoundError(f"DexYCB 数据集目录不存在: {self.dataset_root}")
+
+        self.augmentation = (
+            build_train_augmentation(image_size)
+            if use_augmentation and split == "train"
+            else None
+        )
+
+        # 在导入Toolkit之前设置数据地址, 
+        os.environ["DEX_YCB_DIR"] = str(self.dataset_root)
+        from dex_ycb_toolkit.factory import get_dataset
+
+        self.official_dataset = get_dataset(f"{setup}_{split}")
+        self.samples = list(range(len(self.official_dataset)))
+
+        # 建立视频流，供 FramesPerSecondSampler 使用。
+        for index in self.samples:
+            image_path = Path(self.official_dataset[index]["color_file"])
+
+            stream_id = (
+                f"DexYCB/"
+                f"{image_path.parents[2].name}/"
+                f"{image_path.parents[1].name}/"
+                f"{image_path.parent.name}"
+            )
+
+            if stream_id not in self.streams:
+                self.streams[stream_id] = {
+                    "dataset_name": self.dataset_name,
+                    "fps": 30,
+                    "sample_indices": [],
+                }
+
+            self.streams[stream_id]["sample_indices"].append(index)
+
+        print(
+            f"[{split.upper()}] DexYCB {setup}: "
+            f"root={self.dataset_root}, "
+            f"{len(self.streams)} 条视频流，"
+            f"{len(self.samples)} 个样本",
+            flush=True,
+        )
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        sample = self.official_dataset[self.samples[index]]
+
+        image_path = Path(sample["color_file"])
+        mask_path = Path(sample["label_file"])
+        hand_side = sample["mano_side"]
+
+
+        image_np = np.array(Image.open(image_path).convert("RGB"))
+        with np.load(mask_path) as label:
+            hand_mask_np = (label["seg"] == 255).astype(np.uint8)
+
+        # DexYCB一张图中只有一只手，另一只手的mask为全零
+        if hand_side == "left":
+            left_mask_np = hand_mask_np
+            right_mask_np = np.zeros_like(hand_mask_np)
+        elif hand_side == "right":
+            left_mask_np = np.zeros_like(hand_mask_np)
+            right_mask_np = hand_mask_np
+        else:
+            raise ValueError(f"未知的 mano_side={hand_side!r}: {image_path}")
+
+        original_size = image_np.shape[:2]
+
+        original_image = (
+            torch.from_numpy(image_np.copy()).permute(2, 0, 1)
+            if self.split == "val" else None)
+
+        original_left_mask = (
+            torch.from_numpy(left_mask_np.astype(np.float32)).unsqueeze(0)
+            if self.split == "val" else None)
+        original_right_mask = (
+            torch.from_numpy(right_mask_np.astype(np.float32)).unsqueeze(0)
+            if self.split == "val" else None)
+
+
+        if self.augmentation is not None:
+            transformed = self.augmentation(
+                image=image_np,
+                mask=left_mask_np,
+                right_mask=right_mask_np,
+            )
+
+            image_np = transformed["image"]
+            left_mask_np = transformed["mask"]
+            right_mask_np = transformed["right_mask"]
+
+        else:
+            image_np = cv2.resize(
+                image_np,
+                (self.image_size, self.image_size),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
+            left_mask_np = cv2.resize(
+                left_mask_np,
+                (self.image_size, self.image_size),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+            right_mask_np = cv2.resize(
+                right_mask_np,
+                (self.image_size, self.image_size),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        image_tensor = (torch.from_numpy(image_np.copy()).permute(2, 0, 1).float() / 255.0)
+        image_tensor = TF.normalize(image_tensor, mean=SAM2_MEAN, std=SAM2_STD)
+
+        left_mask_tensor = torch.from_numpy(left_mask_np.astype(np.float32)).unsqueeze(0)
+        right_mask_tensor = torch.from_numpy(right_mask_np.astype(np.float32)).unsqueeze(0)
+
+        # SAM 使用标签 2、3 表示 box 的左上角和右下角。
+        bbox = torch.tensor(
+            [
+                [0.0, 0.0],
+                [self.image_size - 1.0, self.image_size - 1.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        box_labels = torch.tensor(
+            [2, 3],
+            dtype=torch.int64,
+        )
+
+        sample_id = (
+            f"DexYCB__"
+            f"{image_path.parents[2].name}__"
+            f"{image_path.parents[1].name}__"
+            f"{image_path.parent.name}__"
+            f"{image_path.stem}"
+        )
+
+        return {
+            "image": image_tensor,
+            "left_mask": left_mask_tensor,
+            "right_mask": right_mask_tensor,
+            "bbox": bbox,
+            "box_labels": box_labels,
+            "original_size": original_size,
+            "original_image": original_image,
+            "original_left_mask": original_left_mask,
+            "original_right_mask": original_right_mask,
+            "image_path": str(image_path),
+            "mask_path": str(mask_path),
+            "sample_id": sample_id,
+            "dataset_name": self.dataset_name,
+        }
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
 
 def collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """组成 batch，同时把不同尺寸的验证原图保存在列表中。"""
@@ -422,22 +600,38 @@ def build_dataloaders(
         device: torch.device,
 ) -> tuple[DataLoader, DataLoader, FramesPerSecondSampler]:
     """创建训练/验证 Dataset、FPS Sampler 和 DataLoader。"""
-    train_dataset = MultiServerDualHandDataset(
-        dataset_root=args.dataset_root,
+    # train_dataset = MultiServerDualHandDataset(
+    #     dataset_root=args.dataset_root,
+    #     split="train",
+    #     test_seq_count=args.test_seq_count,
+    #     image_size=args.image_size,
+    #     use_augmentation=not args.disable_augmentation,
+    #     dataset_names=args.dataset_names,
+    # )
+
+    # val_dataset = MultiServerDualHandDataset(
+    #     dataset_root=args.dataset_root,
+    #     split="val",
+    #     test_seq_count=args.test_seq_count,
+    #     image_size=args.image_size,
+    #     use_augmentation=False,
+    #     dataset_names=args.dataset_names,
+    # )
+
+    train_dataset = DexYCBDataset(
+        dataset_root=args.dex_ycb_root,
         split="train",
-        test_seq_count=args.test_seq_count,
+        setup="s0",
         image_size=args.image_size,
         use_augmentation=not args.disable_augmentation,
-        dataset_names=args.dataset_names,
     )
 
-    val_dataset = MultiServerDualHandDataset(
-        dataset_root=args.dataset_root,
+    val_dataset = DexYCBDataset(
+        dataset_root=args.dex_ycb_root,
         split="val",
-        test_seq_count=args.test_seq_count,
+        setup="s0",
         image_size=args.image_size,
         use_augmentation=False,
-        dataset_names=args.dataset_names,
     )
 
     train_sampler = FramesPerSecondSampler(

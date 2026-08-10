@@ -41,10 +41,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-point-prompt", action="store_true")
     
     # dataset
-    parser.add_argument("--dataset-root", type=Path, required=True)
+    # parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--frames-per-second", type=float, default=2.0)
-    parser.add_argument("--dataset-names", nargs="+", default=None)
-    parser.add_argument("--test-seq-count", type=int, default=2)
+    # parser.add_argument("--dataset-names", nargs="+", default=None)
+    # parser.add_argument("--test-seq-count", type=int, default=2)
+
+    # dex-ycb dataset
+    parser.add_argument("--dex_ycb_root", type=Path, required=True)
 
     # Loss Weights
     parser.add_argument("--bce-weight", type=float, default=1.0)
