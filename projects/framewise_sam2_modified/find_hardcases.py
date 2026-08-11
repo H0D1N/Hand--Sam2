@@ -514,8 +514,12 @@ def _save_four_panel(state: dict[str, Any], path: Path) -> None:
 
 def save_frame_case(record: dict[str, Any], state: dict[str, Any], output_dir: Path) -> None:
     name = f"{_safe_name(record['sample_id'])}.png"
-    for category in record["categories"]:
-        _save_four_panel(state, output_dir / category / _safe_name(record["dataset_name"]) / name)
+    issue_types = sorted({(issue["category"], issue["reason"]) for issue in record["issues"]})
+    for category, reason in issue_types:
+        path = output_dir / category
+        if category in {"region_error", "spatial_error"}:
+            path /= reason
+        _save_four_panel(state, path / _safe_name(record["dataset_name"]) / name)
 
 
 def save_temporal_case(
