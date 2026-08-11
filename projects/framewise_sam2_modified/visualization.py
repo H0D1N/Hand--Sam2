@@ -123,6 +123,22 @@ def save_dual_hand_five_panel_visualization(
     _save(result, save_path)
 
 
+def save_dual_hand_four_panel_visualization(
+    original_image, left_pred_mask, right_pred_mask,
+    left_gt_mask, right_gt_mask, save_path,
+):
+    image = _display_image(original_image)
+    top = torch.cat([
+        _overlay(image, left=left_gt_mask),
+        _overlay(image, left=left_pred_mask),
+    ], dim=-1)
+    bottom = torch.cat([
+        _overlay(image, right=right_gt_mask),
+        _overlay(image, right=right_pred_mask),
+    ], dim=-1)
+    _save(torch.cat([top, bottom], dim=-2), save_path)
+
+
 def make_dual_hand_tensorboard_image(
         normalized_image,
         left_pred_mask,
