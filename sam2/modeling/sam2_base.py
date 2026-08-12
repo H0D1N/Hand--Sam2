@@ -505,17 +505,28 @@ class SAM2Base(torch.nn.Module):
         num_frames,
         track_in_reverse=False,  # tracking in reverse time order (for demo usage)
     ):
+        """
+        Input:
+        current_vision_feats 这里只传入最低分辨率尺度组成的单元素list：[Tensor[HW, O, 256]]
+
+        Output:
+        返回pix_feat：经过memory融合后的Tensor[O,256,H,W]
+        """
         """Fuse the current frame's visual feature map with previous memory."""
+        # 计算维度
         B = current_vision_feats[-1].size(1)  # batch size on this frame
         C = self.hidden_dim
         H, W = feat_sizes[-1]  # top-level (lowest-resolution) feature size
         device = current_vision_feats[-1].device
+
+        # num_maskmem=0时(如训练图片)不用memory，无需 选择 与 融合 memory
         # The case of `self.num_maskmem == 0` below is primarily used for reproducing SAM on images.
         # In this case, we skip the fusion with any memory.
         if self.num_maskmem == 0:  # Disable memory and skip fusion
             pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
             return pix_feat
 
+        # memory selection部分
         num_obj_ptr_tokens = 0
         tpos_sign_mul = -1 if track_in_reverse else 1
         # Step 1: condition the visual features of the current frame on previous memories
@@ -524,13 +535,18 @@ class SAM2Base(torch.nn.Module):
             to_cat_memory, to_cat_memory_pos_embed = [], []
             # Add conditioning frames's output first (all cond frames have t_pos=0 for
             # when getting temporal positional embedding below)
+# 至少一个condition_frame
             assert len(output_dict["cond_frame_outputs"]) > 0
             # Select a maximum number of temporally closest cond frames for cross attention
+
+            # 选择conditioning memory，t_pos全部设置成 0 表示这部分Memory 有人工prompts
             cond_outputs = output_dict["cond_frame_outputs"]
             selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
                 frame_idx, cond_outputs, self.max_cond_frames_in_attn
             )
             t_pos_and_prevs = [(0, out) for out in selected_cond_outputs.values()]
+
+            # 选择普通 Memory，无条件，无提示
             # Add last (self.num_maskmem - 1) frames before current frame for non-conditioning memory
             # the earliest one has t_pos=1 and the latest one has t_pos=self.num_maskmem-1
             # We also allow taking the memory frame non-consecutively (with stride>1), in which case
@@ -560,13 +576,16 @@ class SAM2Base(torch.nn.Module):
                         prev_frame_idx = -(-(frame_idx + 2) // stride) * stride
                         # then seek further among every r-th frames
                         prev_frame_idx = prev_frame_idx + (t_rel - 2) * stride
+                # out 不断 get 所选历史帧的完整输出字典（"maskmem_features","maskmem_pos_enc"...）
                 out = output_dict["non_cond_frame_outputs"].get(prev_frame_idx, None)
                 if out is None:
                     # If an unselected conditioning frame is among the last (self.num_maskmem - 1)
                     # frames, we still attend to it as if it's a non-conditioning frame.
                     out = unselected_cond_outputs.get(prev_frame_idx, None)
+                # out（dict元素） append 到所有选出的list上
                 t_pos_and_prevs.append((t_pos, out))
 
+            # 分离出out中的 maskmem_features 和 maskmem_pos_enc，各自组成list
             for t_pos, prev in t_pos_and_prevs:
                 if prev is None:
                     continue  # skip padding frames
@@ -584,10 +603,16 @@ class SAM2Base(torch.nn.Module):
                 to_cat_memory_pos_embed.append(maskmem_enc)
 
             # Construct the list of past object pointers
+            # 单帧初始的obj_ptr:[O,256]
+            # 共 Bv * O 个 obj_ptr
+            # 最后拼接到 memory 上
             if self.use_obj_ptrs_in_encoder:
+                # 一个对象最多取多少帧的ptr: min(Bv, max_num_ptrs)
                 max_obj_ptrs_in_encoder = min(num_frames, self.max_obj_ptrs_in_encoder)
                 # First add those object pointers from selected conditioning frames
                 # (optionally, only include object pointers in the past during evaluation)
+                
+                # 1. 获得cond_frame 下的ptr
                 if not self.training and self.only_obj_ptrs_in_the_past_for_eval:
                     ptr_cond_outputs = {
                         t: out
@@ -608,6 +633,7 @@ class SAM2Base(torch.nn.Module):
                     )
                     for t, out in ptr_cond_outputs.items()
                 ]
+                # 2. non_cond_frame下的ptr:搜索距离1...max_obj_ptrs_in_encoder-1的普通帧pointer
                 # Add up to (max_obj_ptrs_in_encoder - 1) non-conditioning frames before current frame
                 for t_diff in range(1, max_obj_ptrs_in_encoder):
                     t = frame_idx + t_diff if track_in_reverse else frame_idx - t_diff
@@ -618,6 +644,8 @@ class SAM2Base(torch.nn.Module):
                     )
                     if out is not None:
                         pos_and_ptrs.append((t_diff, out["obj_ptr"]))
+                
+                # 3. ptr reshape后 concat 到memory上
                 # If we have at least one object pointer, add them to the across attention
                 if len(pos_and_ptrs) > 0:
                     pos_list, ptrs_list = zip(*pos_and_ptrs)
@@ -649,6 +677,7 @@ class SAM2Base(torch.nn.Module):
                 else:
                     num_obj_ptr_tokens = 0
         else:
+            # 初始条件帧(is_init_cond_frame)没有memory,pix_feat直接加入no-mem embedding
             # for initial conditioning frames, encode them without using any previous memory
             if self.directly_add_no_mem_embed:
                 # directly add no-mem embedding (instead of using the transformer encoder)
@@ -675,6 +704,7 @@ class SAM2Base(torch.nn.Module):
         pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
         return pix_feat_with_mem
 
+    # MEMORY
     def _encode_new_memory(
         self,
         current_vision_feats,
@@ -684,11 +714,29 @@ class SAM2Base(torch.nn.Module):
         is_mask_from_pts,
     ):
         """Encode the current image and its prediction into a memory feature."""
+        """
+        FUNCTION: memory_encoder
+        Input
+        current_vision_feats: 为多尺度，但只使用最小的feature map
+        
+        pred_masks_high_res: [B, 1, 1024, 1024]
+        
+        Output:
+        通道较少，方便后续cross attention
+        maskmem_features: 特征 [B, 64, 64, 64]
+        maskmem_pos_enc： 位置编码 [Tensor[B, 64, 64, 64]]
+
+
+        """
+        # 图像大小预处理
         B = current_vision_feats[-1].size(1)  # batch size on this frame
         C = self.hidden_dim
         H, W = feat_sizes[-1]  # top-level (lowest-resolution) feature size
         # top-level feature, (HW)BC => BCHW
         pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
+        
+        # mask 预处理：sigmoid和放缩
+            # 当同时跟踪多个对象时，保证同一个像素最多只能归属于一个对象
         if self.non_overlap_masks_for_mem_enc and not self.training:
             # optionally, apply non-overlapping constraints to the masks (it's applied
             # in the batch dimension and should only be used during eval, where all
@@ -708,6 +756,9 @@ class SAM2Base(torch.nn.Module):
             mask_for_mem = mask_for_mem * self.sigmoid_scale_for_mem_enc
         if self.sigmoid_bias_for_mem_enc != 0.0:
             mask_for_mem = mask_for_mem + self.sigmoid_bias_for_mem_enc
+        
+        # 进入memory encoder
+        # pix_feat 与 mask_for_mem 相加融合，得到的特征再算出位置编码
         maskmem_out = self.memory_encoder(
             pix_feat, mask_for_mem, skip_mask_sigmoid=True  # sigmoid already applied
         )
@@ -739,6 +790,10 @@ class SAM2Base(torch.nn.Module):
         track_in_reverse,
         prev_sam_mask_logits,
     ):
+        """
+        Input:
+        current_vision_feats: 为多尺度，但pix_feat只使用最小的feature map
+        """
         current_out = {"point_inputs": point_inputs, "mask_inputs": mask_inputs}
         # High-resolution feature maps for the SAM head, reshape (HW)BC => BCHW
         if len(current_vision_feats) > 1:
@@ -757,11 +812,12 @@ class SAM2Base(torch.nn.Module):
                 pix_feat, high_res_features, mask_inputs
             )
         else:
+            # 选择并使用 memory（memory bank + memory attention）
             # fused the visual feature with previous memory features in the memory bank
             pix_feat = self._prepare_memory_conditioned_features(
                 frame_idx=frame_idx,
                 is_init_cond_frame=is_init_cond_frame,
-                current_vision_feats=current_vision_feats[-1:],
+                current_vision_feats=current_vision_feats[-1:], # 只使用最小的feature map
                 current_vision_pos_embeds=current_vision_pos_embeds[-1:],
                 feat_sizes=feat_sizes[-1:],
                 output_dict=output_dict,
@@ -786,6 +842,7 @@ class SAM2Base(torch.nn.Module):
 
         return current_out, sam_outputs, high_res_features, pix_feat
 
+    # MEMORY
     def _encode_memory_in_output(
         self,
         current_vision_feats,
@@ -796,6 +853,10 @@ class SAM2Base(torch.nn.Module):
         object_score_logits,
         current_out,
     ):
+        """
+        Input:
+        current_vision_feats: 为多尺度
+        """
         if run_mem_encoder and self.num_maskmem > 0:
             high_res_masks_for_mem_enc = high_res_masks
             maskmem_features, maskmem_pos_enc = self._encode_new_memory(

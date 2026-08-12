@@ -105,8 +105,22 @@ class SAM2Train(SAM2Base):
                 p.requires_grad = False
 
     def forward(self, input: BatchedVideoDatapoint):
+        """
+        input.flat_img_batch
+        # 所有需要处理的图片摊平后：
+        # [图片总数, 3, 1024, 1024]
+
+        input.masks
+        # 按帧组织的 GT mask：
+        #  [batch_size, 对象数, 1024, 1024]
+
+        input.flat_obj_to_img_idx
+        # 每一帧的每个对象对应 flat_img_batch 中哪张图片
+        """
         if self.training or not self.forward_backbone_per_frame_for_eval:
             # precompute image features on all frames before tracking
+            # 所有图片经过 Image Encoder
+            # 得到多尺度特征：backbone_out["backbone_fpn"]
             backbone_out = self.forward_image(input.flat_img_batch)
         else:
             # defer image feature computation on a frame until it's being tracked
@@ -148,11 +162,76 @@ class SAM2Train(SAM2Base):
         Prepare input mask, point or box prompts. Optionally, we allow tracking from
         a custom `start_frame_idx` to the end of the video (for evaluation purposes).
         """
+        """
+        Input:
+        backbone_out: backbone_out["backbone_fpn"], backbone_out["vision_pos_enc"]
+
+        input: BatchedVideoDatapoint
+        input.img_batch.shape :[T,Bv,C,H,W]
+        input.flat_img_batch.shape : [Bv*T,C,H,W]
+        input.masks.shape: [T,O,H,W]
+        input.obj_to_frame_idx.shape: [T,O,2]
+
+        Output:
+        backbone_out = {
+
+        "backbone_fpn": [
+            Tensor[8,256,256,256],
+            Tensor[8,256,128,128],
+            Tensor[8,256,64,64],
+        ],
+
+        "vision_pos_enc": [...],
+
+        # 新增的训练信息
+        "gt_masks_per_frame": {
+            0: Tensor[3,1,1024,1024],
+            1: Tensor[3,1,1024,1024],
+            ...
+            7: Tensor[3,1,1024,1024],
+        },
+
+        "num_frames": 8,
+
+        "use_pt_input": True,
+
+        "init_cond_frames": [0,5],
+
+        "frames_not_in_init_cond": [
+            1,2,3,4,6,7
+        ],
+
+        "point_inputs_per_frame": {
+            0: {
+                "point_coords": Tensor[3,1,2],
+                "point_labels": Tensor[3,1],
+            },
+            5: {
+                "point_coords": Tensor[3,1,2],
+                "point_labels": Tensor[3,1],
+            },
+        },
+
+        "mask_inputs_per_frame": {},
+
+        "frames_to_add_correction_pt": [0,4],
+    }
+        """
+
         # Load the ground-truth masks on all frames (so that we can later
         # sample correction points from them)
         # gt_masks_per_frame = {
         #     stage_id: targets.segments.unsqueeze(1)  # [B, 1, H_im, W_im]
         #     for stage_id, targets in enumerate(input.find_targets)
+        # }
+
+        # 把gt 按帧整理
+        # input.masks [8,3,1024,1024] -> 
+        # gt_masks_per_frame = {
+        #     0: [3,1,1024,1024],
+        #     1: [3,1,1024,1024],
+        #     ...
+        #     7: [3,1,1024,1024],
         # }
         gt_masks_per_frame = {
             stage_id: masks.unsqueeze(1)  # [B, 1, H_im, W_im]
@@ -178,6 +257,10 @@ class SAM2Train(SAM2Base):
             rand_frames_to_correct = self.rand_frames_to_correct_for_eval
             num_init_cond_frames = self.num_init_cond_frames_for_eval
             rand_init_cond_frames = self.rand_init_cond_frames_for_eval
+        
+        # 决定用点/框还是 mask: prob_to_use_pt_input
+        # 选择用户（训练时电脑模拟）主动提供提示的帧：num_init_cond_frames
+        # 选择未来需要模拟纠错的帧： num_frames_to_correct
         if num_frames == 1:
             # here we handle a special case for mixing video + SAM on image training,
             # where we force using point input for the SAM task on static images
@@ -270,10 +353,57 @@ class SAM2Train(SAM2Base):
         self, backbone_out, input: BatchedVideoDatapoint, return_dict=False
     ):
         """Forward video tracking on each frame (and sample correction clicks)."""
+        """
+        Input:
+
+
+        backbone_out
+            模型计算出的特征：Image Encoder 输出的多尺度特征和 prepare_prompt_inputs()生成的训练交互计划
+        backbone_out = {
+        "backbone_fpn": [
+            Tensor[8,256,256,256],
+            Tensor[8,256,128,128],
+            Tensor[8,256,64,64],
+        ],
+        "vision_pos_enc": [
+            Tensor[8,256,256,256],
+            Tensor[8,256,128,128],
+            Tensor[8,256,64,64],
+        ],
+        "gt_masks_per_frame": {
+            0: Tensor[3,1,1024,1024],
+            ...
+            7: Tensor[3,1,1024,1024],
+        },
+        "num_frames": 8,
+        "init_cond_frames": [0,5],
+        "frames_not_in_init_cond": [1,2,3,4,6,7],
+        "point_inputs_per_frame": {...},
+        "mask_inputs_per_frame": {...},
+        "frames_to_add_correction_pt": [0,4],
+        }
+
+        input: BatchedVideoDatapoint, 图片与掩码
+
+        input.img_batch.shape :[T,Bv,C,H,W]
+        input.flat_img_batch.shape : [Bv*T,C,H,W]
+        input.masks.shape: [T,O,H,W]
+        input.obj_to_frame_idx.shape: [T,O,2]
+        
+        Output
+
+        
+        """
+
+        # 整理 backbone_fpn
         img_feats_already_computed = backbone_out["backbone_fpn"] is not None
         if img_feats_already_computed:
             # Prepare the backbone features
             # - vision_feats and vision_pos_embeds are in (HW)BC format
+            # (HW) 个token
+            # N=Bv*T，是摊平后的图片总数
+            # C 每个token的通道数
+            # vision_feats：多尺度
             (
                 _,
                 vision_feats,
@@ -292,12 +422,31 @@ class SAM2Train(SAM2Base):
             "cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
             "non_cond_frame_outputs": {},  # dict containing {frame_idx: <out>}
         }
+
+        # 串联 memory, sam_head，等关键结构
+        # 已有 帧处理顺序，所有帧的视觉特征，空的memory_bank(output_dict)
         for stage_id in processing_order:
             # Get the image features for the current frames
             # img_ids = input.find_inputs[stage_id].img_ids
+            # img_ids: [O]大小的tensor，每个对象一个序号
+            # 当前帧的每个对象，应该使用 flat_img_batch 中的哪张图片
             img_ids = input.flat_obj_to_img_idx[stage_id]
             if img_feats_already_computed:
                 # Retrieve image features according to img_ids (if they are already computed).
+                
+                # x[:, img_ids] 等价于 x[:, img_ids, :]
+                # img_ids 是 Tensor，所以属于批量索引，假设它是torch.tensor([2, 2, 2])
+                # 相当于一次取出：
+                # x[:, 2, :]
+                # x[:, 2, :]
+                # x[:, 2, :]
+                # 然后按沿dim=1排列
+
+                # [token总数, 图片数, token通道数]
+                # ->
+                # [token总数, 对象数, token通道数]
+
+                # current_vision_feats 依然是多尺度，但是dim1意义改变
                 current_vision_feats = [x[:, img_ids] for x in vision_feats]
                 current_vision_pos_embeds = [x[:, img_ids] for x in vision_pos_embeds]
             else:
@@ -367,8 +516,28 @@ class SAM2Train(SAM2Base):
         frames_to_add_correction_pt=None,
         gt_masks=None,
     ):
+        """
+        Input:
+        current_vision_feats: 为多尺度
+        """
+        """
+        Memory bank 作为output_dict传入
+        包含
+        output_dict["cond_frame_outputs"]
+        output_dict["non_cond_frame_outputs"]
+
+        每一帧主要用到
+        maskmem_features
+        maskmem_pos_enc
+        obj_ptr：历史帧的对象级memory
+        
+        """
         if frames_to_add_correction_pt is None:
             frames_to_add_correction_pt = []
+        
+        # 读 memory 并第一次预测
+        # Memory_Selection:选择已有的memory
+        # Memory Attention:读取并融合memory
         current_out, sam_outputs, high_res_features, pix_feat = self._track_step(
             frame_idx,
             is_init_cond_frame,
@@ -401,6 +570,7 @@ class SAM2Train(SAM2Base):
         current_out["multistep_point_inputs"] = [point_inputs]
         current_out["multistep_object_score_logits"] = [object_score_logits]
 
+        # 可选的用户纠错
         # Optionally, sample correction points iteratively to correct the mask
         if frame_idx in frames_to_add_correction_pt:
             point_inputs, final_sam_outputs = self._iter_correct_pt_sampling(
@@ -432,6 +602,7 @@ class SAM2Train(SAM2Base):
         current_out["pred_masks_high_res"] = high_res_masks
         current_out["obj_ptr"] = obj_ptr
 
+        # 最后写入memory
         # Finally run the memory encoder on the predicted mask to encode
         # it into a new memory feature (that can be used in future frames)
         self._encode_memory_in_output(

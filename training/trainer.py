@@ -453,7 +453,13 @@ class Trainer:
         model: nn.Module,
         phase: str,
     ):
-
+        """
+        核心训练流程
+        model   = SAM2Train
+        batch   = 一批视频帧和 GT mask
+        outputs = SAM 2 每帧的预测
+        targets = 每帧 GT mask
+        """
         outputs = model(batch)
         targets = batch.masks
         batch_size = len(batch.img_batch)

@@ -10,3 +10,5 @@ outputs/*
 checkpoints/*.pt
 demo/backend/checkpoints/*.pt
 /framewise_data/
+/memory_data/
+/assets/
