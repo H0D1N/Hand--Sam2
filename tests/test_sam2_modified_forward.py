@@ -94,6 +94,7 @@ def check_branch_outputs(
     image_size,
     hidden_dim,
     device,
+    num_masks,
 ):
     assert isinstance(branch_outputs, dict), branch_name
     assert set(branch_outputs.keys()) == EXPECTED_BRANCH_KEYS
@@ -103,17 +104,17 @@ def check_branch_outputs(
     expected_shapes = {
         "low_res_multimasks": (
             batch_size,
-            1,
+            num_masks,
             low_res_size,
             low_res_size,
         ),
         "high_res_multimasks": (
             batch_size,
-            1,
+            num_masks,
             image_size,
             image_size,
         ),
-        "ious": (batch_size, 1),
+        "ious": (batch_size, num_masks),
         "low_res_masks": (
             batch_size,
             1,
@@ -169,35 +170,35 @@ def main():
         device=device,
     )
 
-    print("Running no-prompt single-image forward...")
-
-    with torch.inference_mode():
-        outputs = model.forward_single_image(
-            images=images,
-            point_inputs=None,
-            mask_inputs=None,
-            multimask_output=False,
+    for multimask_output, num_masks in (
+        (False, 1),
+        (True, 3),
+    ):
+        print(
+            "Running no-prompt single-image forward "
+            f"with multimask_output={multimask_output}..."
         )
 
-    assert isinstance(outputs, dict)
-    assert set(outputs.keys()) == {"left", "right"}
+        with torch.inference_mode():
+            outputs = model.forward_single_image(
+                images=images,
+                mask_inputs=None,
+                multimask_output=multimask_output,
+            )
 
-    check_branch_outputs(
-        branch_name="left",
-        branch_outputs=outputs["left"],
-        batch_size=batch_size,
-        image_size=model.image_size,
-        hidden_dim=model.hidden_dim,
-        device=device,
-    )
-    check_branch_outputs(
-        branch_name="right",
-        branch_outputs=outputs["right"],
-        batch_size=batch_size,
-        image_size=model.image_size,
-        hidden_dim=model.hidden_dim,
-        device=device,
-    )
+        assert isinstance(outputs, dict)
+        assert set(outputs.keys()) == {"left", "right"}
+
+        for branch_name in ("left", "right"):
+            check_branch_outputs(
+                branch_name=branch_name,
+                branch_outputs=outputs[branch_name],
+                batch_size=batch_size,
+                image_size=model.image_size,
+                hidden_dim=model.hidden_dim,
+                device=device,
+                num_masks=num_masks,
+            )
 
     print(f"SAM2Modified no-prompt single-image forward: OK on {device}")
 

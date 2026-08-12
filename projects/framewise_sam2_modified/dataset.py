@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
-import logging
+
 import cv2
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, ConcatDataset
 from torchvision.transforms import functional as TF
 
 from .frame_sampler import FramesPerSecondSampler
+from sam2.modeling.sam2_utils import get_next_point
 
 try:
     import albumentations as A
@@ -139,19 +142,29 @@ class MultiServerDualHandDataset(Dataset):
             dataset_config = dataset_config_by_name[dataset_name]
 
             self.mask_values[dataset_name] = {
-                "left": dataset_config["mask_values"]["left"][0],
-                "right": dataset_config["mask_values"]["right"][0],
+                "left": dataset_config["mask_values"]["left"],
+                "right": dataset_config["mask_values"]["right"],
             }
 
             # 获得序列列表
-            local_dataset_root = self.dataset_root / "sources" / dataset_name
+            configured_root = Path(
+                dataset_config.get(
+                    "data_root",
+                    f"sources/{dataset_name}",
+                )
+            )
+
+            if configured_root.is_absolute():
+                local_dataset_root = configured_root
+            else:
+                local_dataset_root = self.dataset_root / configured_root
 
             if not local_dataset_root.is_dir():
                 raise FileNotFoundError(f"本地数据集目录不存在: {local_dataset_root}")
 
             sequence_dirs = sorted([
-                path for path in local_dataset_root.iterdir()
-                if path.is_dir() and path.match(dataset_config["sequence_glob"])
+                path for path in local_dataset_root.glob(dataset_config["sequence_glob"])
+                if path.is_dir()
             ])
 
             if len(sequence_dirs) <= test_seq_count:
@@ -223,9 +236,11 @@ class MultiServerDualHandDataset(Dataset):
 
                         sample_index = len(self.samples)
 
+                        relative_image_path = image_path.relative_to(
+                            sequence_dir.parent
+                        )
                         sample_id = (
-                            image_path
-                            .relative_to(self.dataset_root / "sources")
+                            (Path(dataset_name) / relative_image_path)
                             .with_suffix("")
                             .as_posix()
                             .replace("/", "__")
@@ -380,6 +395,203 @@ class MultiServerDualHandDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+class DexYCBDataset(Dataset):
+    """读取 DexYCB 单手数据，输出左右手两个二值 mask。"""
+
+    def __init__(
+        self,
+        dataset_root: str | Path,
+        split: str = "val",
+        setup: str = "s0",
+        image_size: int = 1024,
+        use_augmentation: bool = False,
+    ) -> None:
+        if split not in {"train", "val"}:
+            raise ValueError(f"split 必须是 train 或 val，当前是 {split!r}")
+
+        self.dataset_root = Path(dataset_root).expanduser().resolve()
+        self.split = split
+        self.image_size = image_size
+        self.dataset_name = "DexYCB"
+        self.streams = {}
+
+        if not self.dataset_root.is_dir():
+            raise FileNotFoundError(f"DexYCB 数据集目录不存在: {self.dataset_root}")
+
+        self.augmentation = (
+            build_train_augmentation(image_size)
+            if use_augmentation and split == "train"
+            else None
+        )
+
+        # 在导入Toolkit之前设置数据地址, 
+        os.environ["DEX_YCB_DIR"] = str(self.dataset_root)
+        from dex_ycb_toolkit.factory import get_dataset
+
+        self.official_dataset = get_dataset(f"{setup}_{split}")
+        self.samples = list(range(len(self.official_dataset)))
+
+        # 建立视频流，供 FramesPerSecondSampler 使用。
+        for index in self.samples:
+            image_path = Path(self.official_dataset[index]["color_file"])
+
+            stream_id = (
+                f"DexYCB/"
+                f"{image_path.parents[2].name}/"
+                f"{image_path.parents[1].name}/"
+                f"{image_path.parent.name}"
+            )
+
+            if stream_id not in self.streams:
+                self.streams[stream_id] = {
+                    "dataset_name": self.dataset_name,
+                    "fps": 30,
+                    "sample_indices": [],
+                }
+
+            self.streams[stream_id]["sample_indices"].append(index)
+
+        print(
+            f"[{split.upper()}] DexYCB {setup}: "
+            f"root={self.dataset_root}, "
+            f"{len(self.streams)} 条视频流，"
+            f"{len(self.samples)} 个样本",
+            flush=True,
+        )
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        sample = self.official_dataset[self.samples[index]]
+
+        image_path = Path(sample["color_file"])
+        mask_path = Path(sample["label_file"])
+        hand_side = sample["mano_side"]
+
+
+        image_np = np.array(Image.open(image_path).convert("RGB"))
+        with np.load(mask_path) as label:
+            hand_mask_np = (label["seg"] == 255).astype(np.uint8)
+
+        # DexYCB一张图中只有一只手，另一只手的mask为全零
+        if hand_side == "left":
+            left_mask_np = hand_mask_np
+            right_mask_np = np.zeros_like(hand_mask_np)
+        elif hand_side == "right":
+            left_mask_np = np.zeros_like(hand_mask_np)
+            right_mask_np = hand_mask_np
+        else:
+            raise ValueError(f"未知的 mano_side={hand_side!r}: {image_path}")
+
+        original_size = image_np.shape[:2]
+
+        original_image = (
+            torch.from_numpy(image_np.copy()).permute(2, 0, 1)
+            if self.split == "val" else None)
+
+        original_left_mask = (
+            torch.from_numpy(left_mask_np.astype(np.float32)).unsqueeze(0)
+            if self.split == "val" else None)
+        original_right_mask = (
+            torch.from_numpy(right_mask_np.astype(np.float32)).unsqueeze(0)
+            if self.split == "val" else None)
+
+
+        if self.augmentation is not None:
+            transformed = self.augmentation(
+                image=image_np,
+                mask=left_mask_np,
+                right_mask=right_mask_np,
+            )
+
+            image_np = transformed["image"]
+            left_mask_np = transformed["mask"]
+            right_mask_np = transformed["right_mask"]
+
+        else:
+            image_np = cv2.resize(
+                image_np,
+                (self.image_size, self.image_size),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
+            left_mask_np = cv2.resize(
+                left_mask_np,
+                (self.image_size, self.image_size),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+            right_mask_np = cv2.resize(
+                right_mask_np,
+                (self.image_size, self.image_size),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        image_tensor = (torch.from_numpy(image_np.copy()).permute(2, 0, 1).float() / 255.0)
+        image_tensor = TF.normalize(image_tensor, mean=SAM2_MEAN, std=SAM2_STD)
+
+        left_mask_tensor = torch.from_numpy(left_mask_np.astype(np.float32)).unsqueeze(0)
+        right_mask_tensor = torch.from_numpy(right_mask_np.astype(np.float32)).unsqueeze(0)
+
+        # SAM 使用标签 2、3 表示 box 的左上角和右下角。
+        bbox = torch.tensor(
+            [
+                [0.0, 0.0],
+                [self.image_size - 1.0, self.image_size - 1.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        box_labels = torch.tensor(
+            [2, 3],
+            dtype=torch.int64,
+        )
+
+        sample_id = (
+            f"DexYCB__"
+            f"{image_path.parents[2].name}__"
+            f"{image_path.parents[1].name}__"
+            f"{image_path.parent.name}__"
+            f"{image_path.stem}"
+        )
+
+        return {
+            "image": image_tensor,
+            "left_mask": left_mask_tensor,
+            "right_mask": right_mask_tensor,
+            "bbox": bbox,
+            "box_labels": box_labels,
+            "original_size": original_size,
+            "original_image": original_image,
+            "original_left_mask": original_left_mask,
+            "original_right_mask": original_right_mask,
+            "image_path": str(image_path),
+            "mask_path": str(mask_path),
+            "sample_id": sample_id,
+            "dataset_name": self.dataset_name,
+        }
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+class CombinedStreamDataset(ConcatDataset):
+    def __init__(self, datasets):
+        super().__init__(datasets)
+
+        self.streams = {}
+        offset = 0
+
+        for dataset in datasets:
+            for stream_id, stream in dataset.streams.items():
+                if stream_id in self.streams:
+                    raise ValueError(f"重复 stream_id: {stream_id}")
+
+                self.streams[stream_id] = {
+                    **stream,
+                    "sample_indices": [
+                        offset + index
+                        for index in stream["sample_indices"]
+                    ],
+                }
+
+            offset += len(dataset)
 
 def collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
     """组成 batch，同时把不同尺寸的验证原图保存在列表中。"""
@@ -409,7 +621,7 @@ def build_dataloaders(
         device: torch.device,
 ) -> tuple[DataLoader, DataLoader, FramesPerSecondSampler]:
     """创建训练/验证 Dataset、FPS Sampler 和 DataLoader。"""
-    train_dataset = MultiServerDualHandDataset(
+    train_MultiServer_dataset = MultiServerDualHandDataset(
         dataset_root=args.dataset_root,
         split="train",
         test_seq_count=args.test_seq_count,
@@ -418,7 +630,7 @@ def build_dataloaders(
         dataset_names=args.dataset_names,
     )
 
-    val_dataset = MultiServerDualHandDataset(
+    val_MultiServer_dataset = MultiServerDualHandDataset(
         dataset_root=args.dataset_root,
         split="val",
         test_seq_count=args.test_seq_count,
@@ -426,6 +638,43 @@ def build_dataloaders(
         use_augmentation=False,
         dataset_names=args.dataset_names,
     )
+
+    # 默认只使用 MultiServer。
+    train_dataset = train_MultiServer_dataset
+    val_dataset = val_MultiServer_dataset
+
+    if args.mix_datasets:
+        train_dex_ycb_dataset = DexYCBDataset(
+            dataset_root=args.dex_ycb_root,
+            split="train",
+            setup="s0",
+            image_size=args.image_size,
+            use_augmentation=not args.disable_augmentation,
+        )
+
+        val_dex_ycb_dataset = DexYCBDataset(
+            dataset_root=args.dex_ycb_root,
+            split="val",
+            setup="s0",
+            image_size=args.image_size,
+            use_augmentation=False,
+        )
+
+        train_dataset = CombinedStreamDataset([
+            train_MultiServer_dataset,
+            train_dex_ycb_dataset,
+        ])
+
+        val_dataset = CombinedStreamDataset([
+            val_MultiServer_dataset,
+            val_dex_ycb_dataset,
+        ])
+
+        logging.info("Dataset mode: MultiServer + DexYCB")
+    else:
+        logging.info("Dataset mode: MultiServer only")
+
+
 
     train_sampler = FramesPerSecondSampler(
         dataset=train_dataset,
@@ -454,6 +703,8 @@ def build_dataloaders(
         "num_workers": args.num_workers,
         "pin_memory": device.type == "cuda",
         "collate_fn": collate_batch,
+        # 丢弃不足 batch_size 的 batch，保证每次前向/反向使用相同数量的样本。
+        "drop_last": True,
     }
 
     val_loader_kwargs: dict[str, object] = {
@@ -463,6 +714,8 @@ def build_dataloaders(
         "num_workers": args.num_workers,
         "pin_memory": device.type == "cuda",
         "collate_fn": collate_batch,
+        # 验证保留尾批，确保所有样本都参与指标计算。
+        "drop_last": False,
     }
 
     if args.num_workers > 0:
@@ -497,3 +750,21 @@ def build_dataloaders(
 
     return train_loader, val_loader, train_sampler
 
+def build_center_point_prompt(
+    masks: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    present = masks.flatten(1).any(dim=1)
+
+    coords, labels = get_next_point(
+        gt_masks=masks.bool(),
+        pred_masks=None,
+        method="center",
+    )
+
+    coords[~present] = 0
+    labels[~present] = -1
+
+    return {
+        "point_coords": coords,
+        "point_labels": labels,
+    }
