@@ -234,7 +234,7 @@ def _region_metrics(pred: np.ndarray, gt: np.ndarray) -> tuple[float, float, flo
 
 
 def _gt_state(gt_area: int, image_area: int) -> tuple[str, int]:
-    min_area = max(GT_MIN_AREA_PIXELS, round(image_area * GT_MIN_AREA_RATIO))
+    min_area = max(GT_MIN_AREA_PIXELS, math.ceil(image_area * GT_MIN_AREA_RATIO))
     if gt_area == 0:
         return "empty", min_area
     if gt_area < min_area:
@@ -244,9 +244,9 @@ def _gt_state(gt_area: int, image_area: int) -> tuple[str, int]:
 
 def _prediction_state(pred_area: int, gt_area: int, image_area: int, gt_state: str) -> tuple[str, int]:
     if gt_state == "valid":
-        min_area = max(PRED_MIN_AREA_PIXELS, round(gt_area * PRED_MIN_GT_AREA_RATIO))
+        min_area = max(PRED_MIN_AREA_PIXELS, math.ceil(gt_area * PRED_MIN_GT_AREA_RATIO))
     else:
-        min_area = max(PRED_MIN_AREA_PIXELS, round(image_area * EMPTY_GT_PRED_MIN_AREA_RATIO))
+        min_area = max(PRED_MIN_AREA_PIXELS, math.ceil(image_area * EMPTY_GT_PRED_MIN_AREA_RATIO))
     if pred_area == 0:
         return "empty", min_area
     if pred_area < min_area:
@@ -292,14 +292,14 @@ def _boundary_error_ratio(pred: np.ndarray, gt: np.ndarray) -> float:
 
 
 def _minimum_component_area(reference_area: int) -> int:
-    return max(COMPONENT_MIN_AREA_PIXELS, round(reference_area * COMPONENT_MIN_AREA_RATIO))
+    return max(COMPONENT_MIN_AREA_PIXELS, math.ceil(reference_area * COMPONENT_MIN_AREA_RATIO))
 
 
 def _component_metrics(mask: np.ndarray, gt_area: int) -> tuple[int, float]:
     _, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     areas = stats[1:, cv2.CC_STAT_AREA]
     areas = areas[areas >= _minimum_component_area(gt_area)]
-    largest_ratio = int(areas.max()) / max(int(mask.sum()), 1) if areas.size else 0.0
+    largest_ratio = int(areas.max()) / int(areas.sum()) if areas.size else 0.0
     return int(areas.size), largest_ratio
 
 
@@ -335,7 +335,7 @@ def analyze_frame(
             "boundary_error_ratio": None,
             "gt_components": None, "pred_components": None,
             "gt_largest_component_ratio": None, "pred_largest_component_ratio": None,
-            "wrong_hand_ratio": 0.0, "wrong_hand_area": 0,
+            "wrong_hand_ratio": None, "wrong_hand_area": None,
         }
         metrics[side] = side_metrics
 
