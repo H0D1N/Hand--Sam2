@@ -30,33 +30,20 @@ from training.model.adapter import (
     iter_mask_decoder_adapters,
 )
 
-
-def build_sam2_modified_tiny(
-    checkpoint_path,
-    device="cpu",
-    mode="eval",
+def create_sam2_modified_tiny(
     image_size=1024,
-    use_image_adapter=False,
-    use_decoder_adapter=False,
-    adapter_dim=64,
-    adapter_dropout=0.1,
-    adapter_init_scale=1e-3,
+    model_cls=SAM2Modified,
 ):
-    """Build a SAM2.1 tiny model with independent left/right mask decoders."""
-
-
-    # 0. 检查传入的参数
-    if mode not in {"train", "eval"}:
-        raise ValueError(f"mode must be 'train' or 'eval', but got {mode!r}")
+    """
+    Create an uninitialized SAM2.1 tiny dual-hand model.
+    创建未加载权重、未注入 Adapter 的 CPU 模型
+    """
     if image_size <= 0 or image_size % 16 != 0:
         raise ValueError("image_size must be a positive multiple of 16, "f"but got {image_size}")
 
-    # 1. 处理参数
-    device = torch.device(device)
     sam_feature_size = image_size // 16
 
-
-    # 2. 创建图像编码器 ImageEncoder
+    # 1. 创建图像编码器 ImageEncoder
     # Hiera 是真正从图片中提取视觉特征的主干网络
     image_backbone = Hiera(
         embed_dim=96,
@@ -91,7 +78,7 @@ def build_sam2_modified_tiny(
     )
 
 
-    # 3. 创建记忆注意力 MemoryAttention
+    # 2. 创建记忆注意力 MemoryAttention
     # 当前帧内部的注意力。
     memory_self_attention = RoPEAttention(
         rope_theta=10000.0,
@@ -136,7 +123,7 @@ def build_sam2_modified_tiny(
     )
 
 
-    # 4. 创建记忆编码器 MemoryEncoder
+    # 3. 创建记忆编码器 MemoryEncoder
     # Memory特征使用64维的位置编码。
     memory_position_encoding = PositionEmbeddingSine(
         num_pos_feats=64,
@@ -176,8 +163,8 @@ def build_sam2_modified_tiny(
     )
 
 
-    # 5. 创建SAM2Modified
-    model = SAM2Modified(
+    # 4. 创建SAM2Modified
+    model = model_cls(
         # 前面手动创建的三个主要模块。
         image_encoder=image_encoder,
         memory_attention=memory_attention,
@@ -243,9 +230,32 @@ def build_sam2_modified_tiny(
     # model.left_mask_decoder
     # model.right_mask_decoder
     # 原来的model.sam_mask_decoder已经被删除。
-
     
-    # 6. 加载checkpoint
+    return model
+
+def build_sam2_modified_tiny(
+    checkpoint_path,
+    device="cpu",
+    mode="eval",
+    image_size=1024,
+    use_image_adapter=False,
+    use_decoder_adapter=False,
+    adapter_dim=64,
+    adapter_dropout=0.1,
+    adapter_init_scale=1e-3,
+):
+    """Build a SAM2.1 tiny model with independent left/right mask decoders."""
+    if mode not in {"train", "eval"}:
+        raise ValueError(f"mode must be 'train' or 'eval', but got {mode!r}")
+
+    device = torch.device(device)
+
+    # 1. 创建CPU上的模型
+    model = create_sam2_modified_tiny(
+        image_size=image_size,
+    )
+
+    # 2. 加载checkpoint
     checkpoint_path = Path(checkpoint_path)
 
     # 检查checkpoint文件是否真实存在。

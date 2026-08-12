@@ -13,6 +13,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from projects.framewise_sam2_modified import (
     build_sam2_modified_tiny,
+    create_sam2_modified_tiny,
 )
 from training.model.sam2_modified import SAM2Modified
 
@@ -52,6 +53,37 @@ def prepare_device(device_name):
             torch.cuda.set_device(device)
 
     return device
+
+
+def check_bare_model_construction():
+    model = create_sam2_modified_tiny(image_size=768)
+
+    assert isinstance(model, SAM2Modified)
+    assert model.image_size == 768
+    assert model.training is True
+    assert next(model.parameters()).device.type == "cpu"
+
+    assert hasattr(model, "left_mask_decoder")
+    assert hasattr(model, "right_mask_decoder")
+    assert not hasattr(model, "sam_mask_decoder")
+    assert model.left_mask_decoder is not model.right_mask_decoder
+
+    assert hasattr(model, "memory_attention")
+    assert hasattr(model, "memory_encoder")
+
+    for block in model.image_encoder.trunk.blocks:
+        assert not hasattr(block, "adapter")
+
+    state_keys = model.state_dict().keys()
+    expected_prefixes = (
+        "left_mask_decoder.",
+        "right_mask_decoder.",
+        "memory_attention.",
+        "memory_encoder.",
+    )
+
+    for prefix in expected_prefixes:
+        assert any(key.startswith(prefix) for key in state_keys), prefix
 
 
 def load_official_mask_tokens(checkpoint_path):
@@ -136,6 +168,9 @@ def main():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
     device = prepare_device(args.device)
+
+    print("Checking bare SAM2Modified construction...")
+    check_bare_model_construction()
 
     print(f"Building SAM2Modified on {device}...")
 
