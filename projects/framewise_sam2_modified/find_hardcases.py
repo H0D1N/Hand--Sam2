@@ -36,7 +36,7 @@ GT_MASK_THRESHOLD = 0.5
 
 # GT / prediction states
 GT_MIN_AREA_PIXELS = 64
-GT_MIN_AREA_RATIO = 0.0001
+GT_MIN_AREA_RATIO = 0.0005
 PRED_MIN_AREA_PIXELS = 16
 PRED_MIN_GT_AREA_RATIO = 0.01
 EMPTY_GT_PRED_MIN_AREA_RATIO = 0.0005
@@ -508,6 +508,7 @@ def _save_four_panel(state: dict[str, Any], path: Path) -> None:
         right_pred_mask=torch.from_numpy(state["pred"]["right"]),
         left_gt_mask=torch.from_numpy(state["gt"]["left"]),
         right_gt_mask=torch.from_numpy(state["gt"]["right"]),
+        metrics=state["metrics"],
         save_path=path,
     )
 
