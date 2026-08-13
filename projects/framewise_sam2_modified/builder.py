@@ -30,6 +30,36 @@ from training.model.adapter import (
     iter_mask_decoder_adapters,
 )
 
+def inject_sam2_modified_adapters(
+    model,
+    use_image_adapter=False,
+    use_decoder_adapter=False,
+    adapter_dim=64,
+    adapter_dropout=0.1,
+    adapter_init_scale=1e-3,
+):
+    if use_image_adapter:
+        adapter_count = inject_image_encoder_adapters(
+            model,
+            adapter_dim=adapter_dim,
+            adapter_dropout=adapter_dropout,
+            adapter_init_scale=adapter_init_scale,
+        )
+
+        if adapter_count == 0:
+            raise RuntimeError("没有向 Image Encoder 注入任何 Adapter")
+
+    if use_decoder_adapter:
+        adapter_count = inject_mask_decoder_adapters(
+            model,
+            adapter_dim=adapter_dim,
+            adapter_dropout=adapter_dropout,
+            adapter_init_scale=adapter_init_scale,
+        )
+
+        if adapter_count == 0:
+            raise RuntimeError("没有向 Mask Decoder 注入任何 Adapter")
+
 def create_sam2_modified_tiny(
     image_size=1024,
     model_cls=SAM2Modified,
@@ -287,31 +317,15 @@ def build_sam2_modified_tiny(
     # strict=True要求所有参数名称都必须完全匹配。
     model.load_state_dict(modified_state_dict, strict=True)
 
-    # 6.1 插入 image_encoder的adapter
-    if use_image_adapter:
-        adapter_count = inject_image_encoder_adapters(
-            model,
-            adapter_dim=adapter_dim,
-            adapter_dropout=adapter_dropout,
-            adapter_init_scale=adapter_init_scale,
-        )
-
-        if adapter_count == 0:
-            raise RuntimeError("没有向 Image Encoder 注入任何 Adapter")
-
-    # 6.2 插入 mask_decoder的adapter
-    if use_decoder_adapter:
-        adapter_count = inject_mask_decoder_adapters(
-            model,
-            adapter_dim=adapter_dim,
-            adapter_dropout=adapter_dropout,
-            adapter_init_scale=adapter_init_scale,
-        )
-
-        if adapter_count == 0:
-            raise RuntimeError(
-                "没有向 Mask Decoder 注入任何 Adapter"
-            )
+    # 6. 插入 adapter
+    inject_sam2_modified_adapters(
+        model=model,
+        use_image_adapter=use_image_adapter,
+        use_decoder_adapter=use_decoder_adapter,
+        adapter_dim=adapter_dim,
+        adapter_dropout=adapter_dropout,
+        adapter_init_scale=adapter_init_scale,
+    )
 
 
     # 7. 把模型移动到CPU或GPU
