@@ -227,6 +227,7 @@ class MultiServerDualHandDataset(Dataset):
                         f"{cam_name}"
                     )
                     stream_sample_indices = []
+                    stream_frame_numbers = [] # 时序会用
 
                     for image_path in image_paths:
                         mask_path = mask_dir / image_path.name
@@ -256,12 +257,14 @@ class MultiServerDualHandDataset(Dataset):
                         )
 
                         stream_sample_indices.append(sample_index)
+                        stream_frame_numbers.append(int(image_path.stem)) # 时序会用
 
                     if stream_sample_indices:
                         self.streams[stream_id] = {
                             "dataset_name": dataset_name,
                             "fps": dataset_config.get("fps"),
                             "sample_indices": stream_sample_indices,
+                            "frame_numbers": stream_frame_numbers, # 时序会用
                         }
 
             dataset_sample_count = len(self.samples) - sample_count_before
@@ -447,9 +450,11 @@ class DexYCBDataset(Dataset):
                     "dataset_name": self.dataset_name,
                     "fps": 30,
                     "sample_indices": [],
+                    "frame_numbers": [], # 时序会用
                 }
 
             self.streams[stream_id]["sample_indices"].append(index)
+            self.streams[stream_id]["frame_numbers"].append( int( image_path.stem.split("_")[-1] ) )
 
         print(
             f"[{split.upper()}] DexYCB {setup}: "
