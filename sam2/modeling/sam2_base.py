@@ -412,7 +412,7 @@ class SAM2Base(torch.nn.Module):
             object_score_logits,
         )
 
-    def _use_mask_as_output(self, backbone_features, high_res_features, mask_inputs):
+    def _use_mask_as_output(self, backbone_features, high_res_features, mask_inputs, mask_decoder=None,):
         """
         Directly turn binary `mask_inputs` into a output mask logits without using SAM.
         (same input and output shapes as in _forward_sam_heads above).
@@ -437,11 +437,24 @@ class SAM2Base(torch.nn.Module):
             )
         else:
             # produce an object pointer using the SAM decoder from the mask input
-            _, _, _, _, _, obj_ptr, _ = self._forward_sam_heads(
-                backbone_features=backbone_features,
-                mask_inputs=self.mask_downsample(mask_inputs_float),
-                high_res_features=high_res_features,
-            )
+            mask_prompt = self.mask_downsample(mask_inputs_float)
+
+            if mask_decoder is None:
+                sam_outputs = self._forward_sam_heads(
+                    backbone_features=backbone_features,
+                    mask_inputs=mask_prompt,
+                    high_res_features=high_res_features,
+                )
+            else:
+                sam_outputs = self._forward_one_sam_head(
+                    mask_decoder=mask_decoder,
+                    prompt_encoder=self.sam_prompt_encoder,
+                    backbone_features=backbone_features,
+                    mask_inputs=mask_prompt,
+                    high_res_features=high_res_features,
+                )
+
+            obj_ptr = sam_outputs[5]
         # In this method, we are treating mask_input as output, e.g. using it directly to create spatial mem;
         # Below, we follow the same design axiom to use mask_input to decide if obj appears or not instead of relying
         # on the object_scores from the SAM decoder.
@@ -504,6 +517,7 @@ class SAM2Base(torch.nn.Module):
         output_dict,
         num_frames,
         track_in_reverse=False,  # tracking in reverse time order (for demo usage)
+        memory_attention=None,
     ):
         """
         Input:
@@ -513,6 +527,8 @@ class SAM2Base(torch.nn.Module):
         返回pix_feat：经过memory融合后的Tensor[O,256,H,W]
         """
         """Fuse the current frame's visual feature map with previous memory."""
+
+        memory_attention = self.memory_attention if (memory_attention is None) else memory_attention
         # 计算维度
         B = current_vision_feats[-1].size(1)  # batch size on this frame
         C = self.hidden_dim
@@ -693,7 +709,7 @@ class SAM2Base(torch.nn.Module):
         memory = torch.cat(to_cat_memory, dim=0)
         memory_pos_embed = torch.cat(to_cat_memory_pos_embed, dim=0)
 
-        pix_feat_with_mem = self.memory_attention(
+        pix_feat_with_mem = memory_attention(
             curr=current_vision_feats,
             curr_pos=current_vision_pos_embeds,
             memory=memory,
@@ -712,6 +728,7 @@ class SAM2Base(torch.nn.Module):
         pred_masks_high_res,
         object_score_logits,
         is_mask_from_pts,
+        memory_encoder=None,
     ):
         """Encode the current image and its prediction into a memory feature."""
         """
@@ -725,9 +742,9 @@ class SAM2Base(torch.nn.Module):
         通道较少，方便后续cross attention
         maskmem_features: 特征 [B, 64, 64, 64]
         maskmem_pos_enc： 位置编码 [Tensor[B, 64, 64, 64]]
-
-
         """
+        memory_encoder = self.memory_encoder if (memory_encoder is None) else memory_encoder
+
         # 图像大小预处理
         B = current_vision_feats[-1].size(1)  # batch size on this frame
         C = self.hidden_dim
@@ -759,7 +776,7 @@ class SAM2Base(torch.nn.Module):
         
         # 进入memory encoder
         # pix_feat 与 mask_for_mem 相加融合，得到的特征再算出位置编码
-        maskmem_out = self.memory_encoder(
+        maskmem_out = memory_encoder(
             pix_feat, mask_for_mem, skip_mask_sigmoid=True  # sigmoid already applied
         )
         maskmem_features = maskmem_out["vision_features"]
@@ -852,6 +869,7 @@ class SAM2Base(torch.nn.Module):
         high_res_masks,
         object_score_logits,
         current_out,
+        memory_encoder=None,
     ):
         """
         Input:
@@ -865,6 +883,7 @@ class SAM2Base(torch.nn.Module):
                 pred_masks_high_res=high_res_masks_for_mem_enc,
                 object_score_logits=object_score_logits,
                 is_mask_from_pts=(point_inputs is not None),
+                memory_encoder=memory_encoder,
             )
             current_out["maskmem_features"] = maskmem_features
             current_out["maskmem_pos_enc"] = maskmem_pos_enc
