@@ -15,6 +15,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from projects.dual_hand_memory.builder import (
     build_sam2_dual_hand_memory_tiny,
+    configure_memory_training,
 )
 from projects.framewise_sam2_modified.builder import (
     build_sam2_modified_tiny,
@@ -64,6 +65,36 @@ def check_memory_structure(model):
             right_parameter = right_parameters[name]
             assert torch.equal(left_parameter, right_parameter), name
             assert left_parameter.data_ptr() != right_parameter.data_ptr(), name
+
+
+def check_memory_training_configuration(model):
+    configure_memory_training(model)
+
+    memory_prefixes = (
+        "left_memory_attention.",
+        "right_memory_attention.",
+        "left_memory_encoder.",
+        "right_memory_encoder.",
+    )
+    trainable_names = {
+        name for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+
+    assert trainable_names
+    assert all(name.startswith(memory_prefixes) for name in trainable_names)
+    for prefix in memory_prefixes:
+        assert any(name.startswith(prefix) for name in trainable_names), prefix
+
+    assert not any("adapter" in name for name in trainable_names)
+    assert not any(
+        parameter.requires_grad
+        for parameter in model.left_mask_decoder.parameters()
+    )
+    assert not any(
+        parameter.requires_grad
+        for parameter in model.right_mask_decoder.parameters()
+    )
 
 
 def check_official_checkpoint(checkpoint_path, device):
@@ -189,6 +220,8 @@ def check_framewise_checkpoint(checkpoint_path, device):
         expected = expected_values[source_key]
         assert torch.equal(model_state[left_key].cpu(), expected), left_key
         assert torch.equal(model_state[right_key].cpu(), expected), right_key
+
+    check_memory_training_configuration(model)
 
 
 def main():

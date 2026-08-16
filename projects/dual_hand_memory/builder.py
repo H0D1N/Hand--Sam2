@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import torch
+import logging
 
 from projects.framewise_sam2_modified.builder import (
     create_sam2_modified_tiny,
@@ -133,3 +134,45 @@ def _initialize_from_framewise_checkpoint(
     model.load_state_dict(state_dict, strict=True)
 
     return model
+
+def configure_memory_training(model: torch.nn.Module) -> None:
+    """冻结已有帧级模型，只训练左右手各自的 Memory 模块。"""
+
+    model.requires_grad_(False)
+
+    model.left_memory_attention.requires_grad_(True)
+    model.right_memory_attention.requires_grad_(True)
+    model.left_memory_encoder.requires_grad_(True)
+    model.right_memory_encoder.requires_grad_(True)
+
+    trainable_names = [
+        name for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+
+    allowed_prefixes = (
+        "left_memory_attention.",
+        "right_memory_attention.",
+        "left_memory_encoder.",
+        "right_memory_encoder.",
+    )
+
+    if not trainable_names:
+        raise RuntimeError("没有找到可训练的 Memory 参数")
+
+    if not all(name.startswith(allowed_prefixes) for name in trainable_names):
+        raise RuntimeError("发现 Memory 之外的可训练参数")
+
+    total_params = sum(parameter.numel() for parameter in model.parameters())
+    trainable_params = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+        if parameter.requires_grad
+    )
+
+    logging.info(
+        "Memory parameters | total=%s | trainable=%s (%.2f%%)",
+        f"{total_params:,}",
+        f"{trainable_params:,}",
+        100.0 * trainable_params / total_params,
+    )
