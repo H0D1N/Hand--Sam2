@@ -235,6 +235,10 @@ class SAM2DualHandMemory(SAM2Modified):
                     ),
                 )
 
+            present = curr_frame_gt_masks.flatten(1).any(dim=1)
+            points[~present] = 0
+            labels[~present] = -1
+
             backbone_out["point_inputs_per_frame"][frame_idx] = {
                 "point_coords": points,
                 "point_labels": labels,
