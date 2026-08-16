@@ -12,7 +12,7 @@ from .losses import sequence_dual_hand_loss, LOSS_NAMES
 from projects.framewise_sam2_modified.losses import iou_target_from_logits, object_targets_from_masks
 from projects.framewise_sam2_modified.utils import upsample_logits
 from projects.framewise_sam2_modified.visualization import save_dual_hand_visualization
-
+from projects.framewise_sam2_modified.tensorboard_utils import gradient_l2_norm
 
 def run_training_epoch(
     model: torch.nn.Module,
@@ -22,6 +22,7 @@ def run_training_epoch(
     device: torch.device,
     args: argparse.Namespace,
     epoch: int,
+    tensorboard_writer=None,
 ) -> dict[str, float]:
     model.train()
 
@@ -65,6 +66,37 @@ def run_training_epoch(
             raise FloatingPointError(f"Epoch {epoch + 1}, step {step}: "f"loss={total_loss.detach().item()}")
         
 
+        # TensorBoard：记录当前训练step的Loss和学习率
+        global_step = epoch * num_steps + step
+        should_log_tensorboard = (
+            tensorboard_writer is not None
+            and (
+                global_step == 1
+                or global_step % args.tensorboard_log_interval == 0
+            )
+        )
+
+        if should_log_tensorboard:
+            tensorboard_writer.add_scalar(
+                "train/loss",
+                total_loss.detach().item(),
+                global_step,
+            )
+            tensorboard_writer.add_scalar(
+                "optimizer/learning_rate",
+                optimizer.param_groups[0]["lr"],
+                global_step,
+            )
+
+            for hand in ("left", "right"):
+                for name, value in loss_details[hand].items():
+                    tensorboard_writer.add_scalar(
+                        f"train_loss/{hand}_{name}",
+                        value.detach().item(),
+                        global_step,
+                    )
+
+
         # 完整累积组按 grad_accum_steps 平均
         # 最后不足一组时按实际小批次数平均，避免最后一次参数更新的梯度偏小。
         
@@ -79,6 +111,14 @@ def run_training_epoch(
         should_update = step % grad_accum_steps == 0 or step == num_steps
 
         if should_update:
+            if tensorboard_writer is not None:
+                scaler.unscale_(optimizer)
+                tensorboard_writer.add_scalar(
+                    "optimizer/gradient_l2_norm",
+                    gradient_l2_norm(model),
+                    global_step,
+                )
+
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
