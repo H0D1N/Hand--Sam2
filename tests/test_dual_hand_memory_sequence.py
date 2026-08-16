@@ -86,11 +86,22 @@ def register_memory_counters(model):
     return calls, handles
 
 
-def run_with_memory_counters(model, images, left_masks, right_masks):
+def run_with_memory_counters(
+    model,
+    images,
+    left_masks,
+    right_masks,
+    prompt_mode,
+):
     calls, handles = register_memory_counters(model)
     try:
         with torch.inference_mode():
-            outputs = model.forward_sequence(images, left_masks, right_masks)
+            outputs = model.forward_sequence(
+                images,
+                left_masks,
+                right_masks,
+                prompt_mode=prompt_mode,
+            )
     finally:
         for handle in handles:
             handle.remove()
@@ -103,6 +114,7 @@ def check_t1_output(model, images, left_masks, right_masks):
         images[:, :1],
         left_masks[:, :1],
         right_masks[:, :1],
+        prompt_mode="mask",
     )
     check_output_structure(outputs, num_frames=1)
     assert calls == {
@@ -119,6 +131,7 @@ def check_t2_memory_tracking(model, images, left_masks, right_masks):
         images,
         left_masks,
         right_masks,
+        prompt_mode="mask",
     )
     check_output_structure(first_outputs, num_frames=2)
     assert calls == {
@@ -133,7 +146,12 @@ def check_t2_memory_tracking(model, images, left_masks, right_masks):
         assert torch.equal(first_outputs[0][hand]["high_res_masks"], expected_logits)
 
     with torch.inference_mode():
-        second_outputs = model.forward_sequence(images, left_masks, right_masks)
+        second_outputs = model.forward_sequence(
+            images,
+            left_masks,
+            right_masks,
+            prompt_mode="mask",
+        )
 
     for frame_idx in range(2):
         for hand in ("left", "right"):
@@ -147,7 +165,12 @@ def check_t2_memory_tracking(model, images, left_masks, right_masks):
 def check_memory_gradients(model, images, left_masks, right_masks):
     model.train()
     model.zero_grad(set_to_none=True)
-    outputs = model.forward_sequence(images, left_masks, right_masks)
+    outputs = model.forward_sequence(
+        images,
+        left_masks,
+        right_masks,
+        prompt_mode="point",
+    )
     tracking_outputs = outputs[1]
     loss = sum(
         tracking_outputs[hand]["high_res_masks"].mean()
@@ -174,11 +197,43 @@ def check_memory_gradients(model, images, left_masks, right_masks):
         )
 
 
+def check_prompt_modes(model, images, left_masks, right_masks):
+    backbone_out = model.forward_image(images[:, 0])
+    backbone_out["batch_size"] = images.size(0)
+    backbone_out["num_frames"] = images.size(1)
+
+    point_inputs = model.prepare_prompt_inputs(
+        backbone_out.copy(), left_masks, right_masks,
+        prompt_mode="point",
+    )
+    assert point_inputs["use_pt_input"]
+    assert set(point_inputs["point_inputs_per_frame"]) == {0}
+    assert point_inputs["mask_inputs_per_frame"] == {}
+
+    mask_inputs = model.prepare_prompt_inputs(
+        backbone_out.copy(), left_masks, right_masks,
+        prompt_mode="mask",
+    )
+    assert not mask_inputs["use_pt_input"]
+    assert mask_inputs["point_inputs_per_frame"] == {}
+    assert set(mask_inputs["mask_inputs_per_frame"]) == {0}
+
+    backbone_out["num_frames"] = 1
+    single_frame_inputs = model.prepare_prompt_inputs(
+        backbone_out.copy(), left_masks[:, :1], right_masks[:, :1],
+        prompt_mode="mask",
+    )
+    assert single_frame_inputs["use_pt_input"]
+    assert set(single_frame_inputs["point_inputs_per_frame"]) == {0}
+    assert single_frame_inputs["mask_inputs_per_frame"] == {}
+
+
 def main():
     torch.manual_seed(0)
     model = build_test_model()
     images, left_masks, right_masks = build_test_inputs()
 
+    check_prompt_modes(model, images, left_masks, right_masks)
     check_t1_output(model, images, left_masks, right_masks)
     check_t2_memory_tracking(model, images, left_masks, right_masks)
     check_memory_gradients(model, images, left_masks, right_masks)

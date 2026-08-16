@@ -23,12 +23,17 @@ class SAM2DualHandMemory(SAM2Modified):
         images,
         left_masks,
         right_masks,
+        prompt_mode,
     ):
         """
         images:      [B, T, 3, H, W]
         left_masks:  [B, T, 1, H, W]
         right_masks: [B, T, 1, H, W]
+        prompt_mode: "point" 或 "mask"
         """
+        if prompt_mode not in {"point", "mask"}:
+            raise ValueError(f"不支持的 prompt_mode: {prompt_mode}")
+
         assert images.dim() == 5
         assert left_masks.dim() == 5
         assert right_masks.dim() == 5
@@ -50,6 +55,7 @@ class SAM2DualHandMemory(SAM2Modified):
             backbone_out=backbone_out,
             left_masks=left_masks,
             right_masks=right_masks,
+            prompt_mode=prompt_mode,
         )
 
         # 3. 使用 Prompt 和左右 Memory 运行序列跟踪
@@ -60,6 +66,7 @@ class SAM2DualHandMemory(SAM2Modified):
         backbone_out,
         left_masks,
         right_masks,
+        prompt_mode,
         start_frame_idx=0,
     ):
         """ 依靠 GT 选择 prompt"""
@@ -147,6 +154,12 @@ class SAM2DualHandMemory(SAM2Modified):
             rand_frames_to_correct = self.rand_frames_to_correct_for_eval
             num_init_cond_frames = self.num_init_cond_frames_for_eval
             rand_init_cond_frames = self.rand_init_cond_frames_for_eval
+
+        if prompt_mode == "point":
+            prob_to_use_pt_input = 1.0
+            prob_to_use_box_input = 0.0
+        elif prompt_mode == "mask":
+            prob_to_use_pt_input = 0.0
 
         if num_frames == 1:
             prob_to_use_pt_input = 1.0
