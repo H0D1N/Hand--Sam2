@@ -33,6 +33,10 @@ def parse_args() -> argparse.Namespace:
     init_group.add_argument("--sam-checkpoint", type=Path)
     init_group.add_argument("--framewise-checkpoint", type=Path)
 
+    # Finetune
+    parser.add_argument("--finetune-mode", choices=("auto", "memory-only", "decoder-memory"), default="auto")
+
+    # Prompt
     parser.add_argument("--image-size", type=int, default=768)
 
     # Adapter
@@ -98,6 +102,13 @@ def parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
+    if args.finetune_mode == "auto":
+        args.finetune_mode = (
+            "decoder-memory"
+            if args.sam_checkpoint is not None
+            else "memory-only"
+        )
+
     if args.dataset_mode in {"multiserver", "mixed"} and args.dataset_root is None:
         parser.error("--multiserver/--mixed 需要提供 --dataset-root")
     if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
@@ -153,7 +164,7 @@ def main() -> None:
         adapter_init_scale=args.adapter_init_scale,
     )
     args.image_size = model.image_size
-    configure_memory_training(model)
+    configure_memory_training(model, args.finetune_mode)
 
     # 数据和优化器
     train_loader, val_loader = build_dataloaders(args, device)

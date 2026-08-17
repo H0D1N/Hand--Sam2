@@ -6,7 +6,9 @@ import logging
 from projects.framewise_sam2_modified.builder import (
     create_sam2_modified_tiny,
     inject_sam2_modified_adapters,
+    configure_finetune_stage,
 )
+from training.model.adapter import iter_mask_decoder_adapters
 from training.model.sam2_dual_hand_memory import SAM2DualHandMemory
 from training.utils.sam2_dual_hand_memory_checkpoint import (
     DuplicateMemoryWeights,
@@ -135,10 +137,25 @@ def _initialize_from_framewise_checkpoint(
 
     return model
 
-def configure_memory_training(model: torch.nn.Module) -> None:
+def configure_memory_training(
+    model: torch.nn.Module,
+    finetune_mode: str,
+) -> None:
     """冻结已有帧级模型，只训练左右手各自的 Memory 模块。"""
 
-    model.requires_grad_(False)
+    if finetune_mode == "memory-only":
+        model.requires_grad_(False)
+
+    elif finetune_mode == "decoder-memory":
+        has_decoder_adapter = any(True for _ in iter_mask_decoder_adapters(model))
+
+        configure_finetune_stage(
+            model=model,
+            use_decoder_adapter=has_decoder_adapter,
+        )
+
+    else:
+        raise ValueError(f"Invalid finetune mode: {finetune_mode}")
 
     model.left_memory_attention.requires_grad_(True)
     model.right_memory_attention.requires_grad_(True)
@@ -150,18 +167,8 @@ def configure_memory_training(model: torch.nn.Module) -> None:
         if parameter.requires_grad
     ]
 
-    allowed_prefixes = (
-        "left_memory_attention.",
-        "right_memory_attention.",
-        "left_memory_encoder.",
-        "right_memory_encoder.",
-    )
-
     if not trainable_names:
         raise RuntimeError("没有找到可训练的 Memory 参数")
-
-    if not all(name.startswith(allowed_prefixes) for name in trainable_names):
-        raise RuntimeError("发现 Memory 之外的可训练参数")
 
     total_params = sum(parameter.numel() for parameter in model.parameters())
     trainable_params = sum(

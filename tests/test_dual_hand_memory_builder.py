@@ -16,6 +16,10 @@ from projects.dual_hand_memory.builder import (
     build_sam2_dual_hand_memory_tiny,
     configure_memory_training,
 )
+from training.model.adapter import (
+    iter_image_encoder_adapters,
+    iter_mask_decoder_adapters,
+)
 from training.model.sam2_dual_hand_memory import (
     SAM2DualHandMemory,
 )
@@ -38,6 +42,11 @@ def parse_args():
         "--framewise-checkpoint",
         type=Path,
         help="Framewise dual-decoder best.pt containing checkpoint['model_state'].",
+    )
+    parser.add_argument(
+        "--finetune-mode",
+        choices=("auto", "memory-only", "decoder-memory"),
+        default="auto",
     )
     parser.add_argument("--device", type=str, default="cpu")
     return parser.parse_args()
@@ -66,8 +75,8 @@ def check_memory_structure(model):
             assert left_parameter.data_ptr() != right_parameter.data_ptr(), name
 
 
-def check_memory_training_configuration(model):
-    configure_memory_training(model)
+def check_finetune_configuration(model, finetune_mode):
+    configure_memory_training(model, finetune_mode)
 
     memory_prefixes = (
         "left_memory_attention.",
@@ -75,28 +84,80 @@ def check_memory_training_configuration(model):
         "left_memory_encoder.",
         "right_memory_encoder.",
     )
+    decoder_prefixes = (
+        "left_mask_decoder.",
+        "right_mask_decoder.",
+    )
     trainable_names = {
         name for name, parameter in model.named_parameters()
         if parameter.requires_grad
     }
 
     assert trainable_names
-    assert all(name.startswith(memory_prefixes) for name in trainable_names)
     for prefix in memory_prefixes:
         assert any(name.startswith(prefix) for name in trainable_names), prefix
 
-    assert not any("adapter" in name for name in trainable_names)
-    assert not any(
-        parameter.requires_grad
-        for parameter in model.left_mask_decoder.parameters()
+    if finetune_mode == "memory-only":
+        assert all(name.startswith(memory_prefixes) for name in trainable_names)
+        assert not any("adapter" in name for name in trainable_names)
+        assert not any(
+            parameter.requires_grad
+            for parameter in model.left_mask_decoder.parameters()
+        )
+        assert not any(
+            parameter.requires_grad
+            for parameter in model.right_mask_decoder.parameters()
+        )
+        return
+
+    assert finetune_mode == "decoder-memory"
+    assert any(name.startswith("left_mask_decoder.") for name in trainable_names)
+    assert any(name.startswith("right_mask_decoder.") for name in trainable_names)
+    assert all(
+        name.startswith(memory_prefixes + decoder_prefixes)
+        or (name.startswith("image_encoder.") and ".adapter." in name)
+        for name in trainable_names
     )
     assert not any(
+        name.startswith("image_encoder.") and ".adapter." not in name
+        for name in trainable_names
+    )
+    assert not any(name.startswith("sam_prompt_encoder.") for name in trainable_names)
+
+    image_adapters = list(iter_image_encoder_adapters(model))
+    assert all(
         parameter.requires_grad
-        for parameter in model.right_mask_decoder.parameters()
+        for adapter in image_adapters
+        for parameter in adapter.parameters()
     )
 
+    decoder_adapters = list(iter_mask_decoder_adapters(model))
+    if decoder_adapters:
+        decoder_adapter_parameter_ids = {
+            id(parameter)
+            for adapter in decoder_adapters
+            for parameter in adapter.parameters()
+        }
+        assert all(
+            parameter.requires_grad
+            for adapter in decoder_adapters
+            for parameter in adapter.parameters()
+        )
+        for decoder in (model.left_mask_decoder, model.right_mask_decoder):
+            assert all(
+                parameter.requires_grad
+                == (id(parameter) in decoder_adapter_parameter_ids)
+                for parameter in decoder.transformer.parameters()
+            )
+    else:
+        assert all(
+            parameter.requires_grad
+            for decoder in (model.left_mask_decoder, model.right_mask_decoder)
+            for parameter in decoder.parameters()
+        )
 
-def check_official_checkpoint(checkpoint_path, device):
+
+def check_official_checkpoint(checkpoint_path, device, finetune_mode):
     checkpoint = torch.load(
         checkpoint_path,
         map_location="cpu",
@@ -148,11 +209,13 @@ def check_official_checkpoint(checkpoint_path, device):
         for target_key in target_keys:
             assert torch.equal(model_state[target_key].cpu(), expected), target_key
 
+    check_finetune_configuration(model, finetune_mode)
+
     del model, checkpoint, official_state
     gc.collect()
 
 
-def check_framewise_checkpoint(checkpoint_path, device):
+def check_framewise_checkpoint(checkpoint_path, device, finetune_mode):
     checkpoint = torch.load(
         checkpoint_path,
         map_location="cpu",
@@ -200,7 +263,7 @@ def check_framewise_checkpoint(checkpoint_path, device):
         for target_key in target_keys:
             assert torch.equal(model_state[target_key].cpu(), expected), target_key
 
-    check_memory_training_configuration(model)
+    check_finetune_configuration(model, finetune_mode)
 
     del model, checkpoint, checkpoint_args, framewise_state
     gc.collect()
@@ -218,14 +281,25 @@ def main():
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
 
+    finetune_mode = args.finetune_mode
+    if finetune_mode == "auto":
+        finetune_mode = (
+            "decoder-memory"
+            if args.sam_checkpoint is not None
+            else "memory-only"
+        )
+
     if args.sam_checkpoint is not None:
         print("Checking official SAM2 checkpoint initialization...")
-        check_official_checkpoint(checkpoint_path, device)
+        check_official_checkpoint(checkpoint_path, device, finetune_mode)
     else:
         print("Checking framewise checkpoint initialization...")
-        check_framewise_checkpoint(checkpoint_path, device)
+        check_framewise_checkpoint(checkpoint_path, device, finetune_mode)
 
-    print(f"SAM2DualHandMemory builders: OK on {device}")
+    print(
+        f"SAM2DualHandMemory builder and {finetune_mode} finetuning: "
+        f"OK on {device}"
+    )
 
 
 if __name__ == "__main__":
