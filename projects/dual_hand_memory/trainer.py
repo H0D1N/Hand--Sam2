@@ -45,7 +45,7 @@ def run_training_epoch(
         )
 
         with context:
-            frame_outputs = model.forward_sequence(
+            frame_outputs = model(
                 images=images,
                 left_masks=left_masks,
                 right_masks=right_masks,
@@ -197,7 +197,7 @@ def run_validation_epoch(
         left_masks = batch["left_mask"].to(device, non_blocking=True)
         right_masks = batch["right_mask"].to(device, non_blocking=True)
 
-        frame_outputs = model.forward_sequence(
+        frame_outputs = model(
             images=images,
             left_masks=left_masks,
             right_masks=right_masks,

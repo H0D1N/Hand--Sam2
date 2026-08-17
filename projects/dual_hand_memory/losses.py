@@ -16,7 +16,7 @@ def sequence_dual_hand_loss(
     """
     按照原版 SAM2 的方式，对序列中所有帧的 Loss 直接求和。
 
-    frame_outputs: forward_sequence() 返回的 list[T]
+    frame_outputs: forward() 返回的 list[T]
     left_masks:    [B, T, 1, H, W]
     right_masks:   [B, T, 1, H, W]
     """

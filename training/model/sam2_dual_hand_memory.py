@@ -18,7 +18,7 @@ class SAM2DualHandMemory(SAM2Modified):
         del self.memory_attention
         del self.memory_encoder
 
-    def forward_sequence(
+    def forward(
         self,
         images,
         left_masks,

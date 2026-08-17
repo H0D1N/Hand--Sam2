@@ -21,7 +21,7 @@ class ToySequenceModel(torch.nn.Module):
         self.logit = torch.nn.Parameter(torch.tensor(-0.2))
         self.calls = []
 
-    def forward_sequence(self, images, left_masks, right_masks, prompt_mode):
+    def forward(self, images, left_masks, right_masks, prompt_mode):
         self.calls.append((tuple(images.shape), prompt_mode))
         batch_size, num_frames, _, height, width = images.shape
         frame_outputs = []

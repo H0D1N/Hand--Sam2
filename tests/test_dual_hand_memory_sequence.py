@@ -96,7 +96,7 @@ def run_with_memory_counters(
     calls, handles = register_memory_counters(model)
     try:
         with torch.inference_mode():
-            outputs = model.forward_sequence(
+            outputs = model(
                 images,
                 left_masks,
                 right_masks,
@@ -146,7 +146,7 @@ def check_t2_memory_tracking(model, images, left_masks, right_masks):
         assert torch.equal(first_outputs[0][hand]["high_res_masks"], expected_logits)
 
     with torch.inference_mode():
-        second_outputs = model.forward_sequence(
+        second_outputs = model(
             images,
             left_masks,
             right_masks,
@@ -165,7 +165,7 @@ def check_t2_memory_tracking(model, images, left_masks, right_masks):
 def check_memory_gradients(model, images, left_masks, right_masks):
     model.train()
     model.zero_grad(set_to_none=True)
-    outputs = model.forward_sequence(
+    outputs = model(
         images,
         left_masks,
         right_masks,
