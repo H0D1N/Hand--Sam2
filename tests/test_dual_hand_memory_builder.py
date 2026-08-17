@@ -1,7 +1,6 @@
 import argparse
 import gc
 import sys
-import tempfile
 from pathlib import Path
 
 import torch
@@ -17,17 +16,11 @@ from projects.dual_hand_memory.builder import (
     build_sam2_dual_hand_memory_tiny,
     configure_memory_training,
 )
-from projects.framewise_sam2_modified.builder import (
-    build_sam2_modified_tiny,
-)
 from training.model.sam2_dual_hand_memory import (
     SAM2DualHandMemory,
 )
 
 
-DEFAULT_CHECKPOINT_PATH = (
-    REPOSITORY_ROOT / "checkpoints" / "sam2.1_hiera_tiny.pt"
-)
 TEST_IMAGE_SIZE = 256
 
 
@@ -35,10 +28,16 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Test official and framewise dual-hand Memory builders."
     )
-    parser.add_argument(
-        "--checkpoint",
+    checkpoint_group = parser.add_mutually_exclusive_group(required=True)
+    checkpoint_group.add_argument(
+        "--sam-checkpoint",
         type=Path,
-        default=DEFAULT_CHECKPOINT_PATH,
+        help="Official SAM2 checkpoint containing checkpoint['model'].",
+    )
+    checkpoint_group.add_argument(
+        "--framewise-checkpoint",
+        type=Path,
+        help="Framewise dual-decoder best.pt containing checkpoint['model_state'].",
     )
     parser.add_argument("--device", type=str, default="cpu")
     return parser.parse_args()
@@ -98,6 +97,13 @@ def check_memory_training_configuration(model):
 
 
 def check_official_checkpoint(checkpoint_path, device):
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+    official_state = checkpoint["model"]
+
     model = build_sam2_dual_hand_memory_tiny(
         sam_checkpoint=checkpoint_path,
         image_size=TEST_IMAGE_SIZE,
@@ -116,117 +122,95 @@ def check_official_checkpoint(checkpoint_path, device):
     )
     check_memory_structure(model)
 
-    del model
+    model_state = model.state_dict()
+    for source_key, expected in official_state.items():
+        if source_key.startswith("sam_mask_decoder."):
+            suffix = source_key[len("sam_mask_decoder."):]
+            target_keys = (
+                f"left_mask_decoder.{suffix}",
+                f"right_mask_decoder.{suffix}",
+            )
+        elif source_key.startswith("memory_attention."):
+            suffix = source_key[len("memory_attention."):]
+            target_keys = (
+                f"left_memory_attention.{suffix}",
+                f"right_memory_attention.{suffix}",
+            )
+        elif source_key.startswith("memory_encoder."):
+            suffix = source_key[len("memory_encoder."):]
+            target_keys = (
+                f"left_memory_encoder.{suffix}",
+                f"right_memory_encoder.{suffix}",
+            )
+        else:
+            target_keys = (source_key,)
+
+        for target_key in target_keys:
+            assert torch.equal(model_state[target_key].cpu(), expected), target_key
+
+    del model, checkpoint, official_state
     gc.collect()
-
-
-def create_framewise_checkpoint(checkpoint_path, output_path):
-    model = build_sam2_modified_tiny(
-        checkpoint_path=checkpoint_path,
-        image_size=TEST_IMAGE_SIZE,
-        device="cpu",
-        mode="eval",
-        use_image_adapter=True,
-        adapter_dim=32,
-        adapter_dropout=0.2,
-        adapter_init_scale=1e-2,
-    )
-
-    state_dict = model.state_dict()
-    changed_keys = {
-        "left_mask_decoder.mask_tokens.weight": 0.125,
-        "right_mask_decoder.mask_tokens.weight": 0.250,
-        "image_encoder.trunk.blocks.0.adapter.scale": 0.375,
-        "memory_attention.layers.0.self_attn.q_proj.weight": 0.500,
-        "memory_encoder.mask_downsampler.encoder.0.weight": 0.625,
-    }
-
-    with torch.no_grad():
-        for key, value in changed_keys.items():
-            state_dict[key].fill_(value)
-
-    expected_values = {
-        key: tensor.detach().clone()
-        for key, tensor in state_dict.items()
-        if key in changed_keys
-    }
-
-    torch.save(
-        {
-            "model_state": state_dict,
-            "args": {
-                "image_size": TEST_IMAGE_SIZE,
-                "use_image_adapter": True,
-                "use_decoder_adapter": False,
-                "adapter_dim": 32,
-                "adapter_dropout": 0.2,
-                "adapter_init_scale": 1e-2,
-            },
-        },
-        output_path,
-    )
-
-    del model, state_dict
-    gc.collect()
-    return expected_values
 
 
 def check_framewise_checkpoint(checkpoint_path, device):
-    with tempfile.TemporaryDirectory() as temporary_directory:
-        framewise_checkpoint = Path(temporary_directory) / "best.pt"
-        expected_values = create_framewise_checkpoint(
-            checkpoint_path=checkpoint_path,
-            output_path=framewise_checkpoint,
-        )
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    checkpoint_args = checkpoint["args"]
+    framewise_state = checkpoint["model_state"]
 
-        model = build_sam2_dual_hand_memory_tiny(
-            framewise_checkpoint=framewise_checkpoint,
-            image_size=512,
-            device=device,
-            mode="train",
-            use_image_adapter=False,
-            adapter_dim=8,
-        )
+    assert any(key.startswith("memory_attention.") for key in framewise_state)
+    assert any(key.startswith("memory_encoder.") for key in framewise_state)
+    assert not any(key.startswith("left_memory_attention.") for key in framewise_state)
+    assert not any(key.startswith("right_memory_attention.") for key in framewise_state)
 
-    assert model.image_size == TEST_IMAGE_SIZE
+    model = build_sam2_dual_hand_memory_tiny(
+        framewise_checkpoint=checkpoint_path,
+        image_size=512,
+        device=device,
+        mode="train",
+        use_image_adapter=False,
+        adapter_dim=8,
+    )
+
+    assert model.image_size == checkpoint_args["image_size"]
     assert model.training is True
     assert next(model.parameters()).device == device
-    assert model.image_encoder.trunk.blocks[0].adapter.down_proj.out_features == 32
-    assert model.image_encoder.trunk.blocks[0].adapter.dropout.p == 0.2
     check_memory_structure(model)
 
     model_state = model.state_dict()
-    for key in (
-        "left_mask_decoder.mask_tokens.weight",
-        "right_mask_decoder.mask_tokens.weight",
-        "image_encoder.trunk.blocks.0.adapter.scale",
-    ):
-        assert torch.equal(model_state[key].cpu(), expected_values[key]), key
+    for source_key, expected in framewise_state.items():
+        if source_key.startswith("memory_attention."):
+            suffix = source_key[len("memory_attention."):]
+            target_keys = (
+                f"left_memory_attention.{suffix}",
+                f"right_memory_attention.{suffix}",
+            )
+        elif source_key.startswith("memory_encoder."):
+            suffix = source_key[len("memory_encoder."):]
+            target_keys = (
+                f"left_memory_encoder.{suffix}",
+                f"right_memory_encoder.{suffix}",
+            )
+        else:
+            target_keys = (source_key,)
 
-    memory_key_pairs = (
-        (
-            "memory_attention.layers.0.self_attn.q_proj.weight",
-            "left_memory_attention.layers.0.self_attn.q_proj.weight",
-            "right_memory_attention.layers.0.self_attn.q_proj.weight",
-        ),
-        (
-            "memory_encoder.mask_downsampler.encoder.0.weight",
-            "left_memory_encoder.mask_downsampler.encoder.0.weight",
-            "right_memory_encoder.mask_downsampler.encoder.0.weight",
-        ),
-    )
-
-    for source_key, left_key, right_key in memory_key_pairs:
-        expected = expected_values[source_key]
-        assert torch.equal(model_state[left_key].cpu(), expected), left_key
-        assert torch.equal(model_state[right_key].cpu(), expected), right_key
+        for target_key in target_keys:
+            assert torch.equal(model_state[target_key].cpu(), expected), target_key
 
     check_memory_training_configuration(model)
+
+    del model, checkpoint, checkpoint_args, framewise_state
+    gc.collect()
 
 
 def main():
     args = parse_args()
-    checkpoint_path = args.checkpoint.resolve()
+    checkpoint_path = (
+        args.sam_checkpoint or args.framewise_checkpoint
+    ).resolve()
     device = torch.device(args.device)
 
     if not checkpoint_path.is_file():
@@ -234,11 +218,12 @@ def main():
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available.")
 
-    print("Checking official SAM2 checkpoint initialization...")
-    check_official_checkpoint(checkpoint_path, device)
-
-    print("Checking framewise checkpoint initialization...")
-    check_framewise_checkpoint(checkpoint_path, device)
+    if args.sam_checkpoint is not None:
+        print("Checking official SAM2 checkpoint initialization...")
+        check_official_checkpoint(checkpoint_path, device)
+    else:
+        print("Checking framewise checkpoint initialization...")
+        check_framewise_checkpoint(checkpoint_path, device)
 
     print(f"SAM2DualHandMemory builders: OK on {device}")
 
