@@ -12,6 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 from .builder import build_sam2_dual_hand_memory_tiny, configure_memory_training
 from .dataset import build_dataloaders
 from .trainer import run_training_epoch, run_validation_epoch
+from .losses import DualHandMemoryLoss
 from projects.framewise_sam2_modified.utils import (
     configure_runtime, dump_json, save_checkpoint,
     save_training_curves, set_seed,
@@ -78,10 +79,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefetch-factor", type=int, default=2)
 
     # Loss
-    parser.add_argument("--bce-weight", type=float, default=1.0)
-    parser.add_argument("--dice-weight", type=float, default=1.0)
-    parser.add_argument("--iou-weight", type=float, default=0.1)
-    parser.add_argument("--object-score-weight", type=float, default=1.0)
+    parser.add_argument("--mask-loss-weight", type=float, default=20.0)
+    parser.add_argument("--dice-loss-weight", type=float, default=1.0)
+    parser.add_argument("--iou-loss-weight", type=float, default=1.0)
+    parser.add_argument("--class-loss-weight", type=float, default=1.0)
 
     # Optimizer 与 Scheduler
     parser.add_argument("--optimizer", choices=("adam", "adamw", "radam"), default="adamw")
@@ -166,6 +167,13 @@ def main() -> None:
     args.image_size = model.image_size
     configure_memory_training(model, args.finetune_mode)
 
+    loss_fn = DualHandMemoryLoss(
+        mask_loss_weight=args.mask_loss_weight,
+        dice_loss_weight=args.dice_loss_weight,
+        iou_loss_weight=args.iou_loss_weight,
+        class_loss_weight=args.class_loss_weight,
+    ).to(device)
+
     # 数据和优化器
     train_loader, val_loader = build_dataloaders(args, device)
 
@@ -189,11 +197,11 @@ def main() -> None:
         train_metrics = run_training_epoch(
             model=model, loader=train_loader, optimizer=optimizer,
             scaler=scaler, device=device, args=args, epoch=epoch,
-            tensorboard_writer=writer,
+            tensorboard_writer=writer, loss_fn=loss_fn,
         )
         val_metrics = run_validation_epoch(
             model=model, loader=val_loader, device=device,
-            args=args, epoch=epoch,
+            args=args, epoch=epoch, loss_fn=loss_fn,
         )
         scheduler.step(val_metrics["loss"])
 

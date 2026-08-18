@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 from pathlib import Path
 
-from .losses import sequence_dual_hand_loss, LOSS_NAMES
+from .losses import LOSS_NAMES
 from projects.framewise_sam2_modified.losses import iou_target_from_logits, object_targets_from_masks
 from projects.framewise_sam2_modified.utils import upsample_logits
 from projects.framewise_sam2_modified.visualization import save_dual_hand_visualization
@@ -16,6 +16,7 @@ from projects.framewise_sam2_modified.tensorboard_utils import gradient_l2_norm
 
 def run_training_epoch(
     model: torch.nn.Module,
+    loss_fn: torch.nn.Module,
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
@@ -52,14 +53,10 @@ def run_training_epoch(
                 prompt_mode=args.prompt_mode,
             )
 
-            total_loss, loss_details = sequence_dual_hand_loss(
+            total_loss, loss_details = loss_fn(
                 frame_outputs=frame_outputs,
                 left_masks=left_masks,
                 right_masks=right_masks,
-                bce_weight=args.bce_weight,
-                dice_weight=args.dice_weight,
-                iou_weight=args.iou_weight,
-                object_score_weight=args.object_score_weight,
             )
 
         if not torch.isfinite(total_loss).item():
@@ -129,7 +126,7 @@ def run_training_epoch(
 
         for hand, hand_details in loss_details.items():
             for name, value in hand_details.items():
-                key = f"{hand}_{name}_loss"
+                key = f"{hand}_{name}"
                 loss_sums[key] = loss_sums.get(key, 0.0) + value.detach().item() * batch_size
 
         if step % args.log_interval == 0 or step == num_steps:
@@ -143,16 +140,16 @@ def run_training_epoch(
 
             logging.info(
                 "Epoch %d | step %d/%d | loss=%.4f | "
-                "bce=%.4f | dice=%.4f | iou_loss=%.4f | "
-                "object_score_loss=%.4f",
+                "mask_focal=%.4f | dice=%.4f | iou_loss=%.4f | "
+                "class_loss=%.4f",
                 epoch + 1,
                 step,
                 num_steps,
                 total_loss.detach().item(),
-                mean_details["bce"].detach().item(),
-                mean_details["dice"].detach().item(),
-                mean_details["iou"].detach().item(),
-                mean_details["object_score"].detach().item(),
+                mean_details["loss_mask"].detach().item(),
+                mean_details["loss_dice"].detach().item(),
+                mean_details["loss_iou"].detach().item(),
+                mean_details["loss_class"].detach().item(),
             )
 
     if total_clips == 0:
@@ -166,6 +163,7 @@ def run_training_epoch(
 @torch.inference_mode()
 def run_validation_epoch(
     model: torch.nn.Module,
+    loss_fn: torch.nn.Module,
     loader: DataLoader,
     device: torch.device,
     args: argparse.Namespace,
@@ -203,12 +201,7 @@ def run_validation_epoch(
             right_masks=right_masks,
             prompt_mode=args.prompt_mode,
         )
-        loss, _ = sequence_dual_hand_loss(
-            frame_outputs, left_masks, right_masks,
-            bce_weight=args.bce_weight, dice_weight=args.dice_weight,
-            iou_weight=args.iou_weight,
-            object_score_weight=args.object_score_weight,
-        )
+        loss, _ = loss_fn(frame_outputs, left_masks, right_masks,)
 
         batch_size = images.size(0)
         total_loss += loss.item() * batch_size
@@ -230,8 +223,8 @@ def run_validation_epoch(
 
             # [2B] 
             pred_present = torch.cat((
-                outputs["left"]["object_score_logits"],
-                outputs["right"]["object_score_logits"],
+                outputs["left"]["multistep_object_score_logits"][-1],
+                outputs["right"]["multistep_object_score_logits"][-1],
             )).reshape(-1) > 0
 
             object_tp += (pred_present & gt_present).sum().item()
@@ -245,9 +238,9 @@ def run_validation_epoch(
                 original_size = original_right_mask.shape[-2:]
 
                 left_logits = upsample_logits(
-                    outputs["left"]["high_res_masks"][sample_idx:sample_idx + 1], size=original_size,)
+                    outputs["left"]["pred_masks_high_res"][sample_idx:sample_idx + 1], size=original_size,)
                 right_logits = upsample_logits(
-                    outputs["right"]["high_res_masks"][sample_idx:sample_idx + 1], size=original_size,)
+                    outputs["right"]["pred_masks_high_res"][sample_idx:sample_idx + 1], size=original_size,)
 
                 left_iou = iou_target_from_logits(left_logits, original_left_mask)
                 right_iou = iou_target_from_logits(right_logits, original_right_mask)

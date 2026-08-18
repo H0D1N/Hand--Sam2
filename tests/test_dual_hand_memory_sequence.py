@@ -11,6 +11,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 
 from projects.framewise_sam2_modified import create_sam2_modified_tiny
+from projects.dual_hand_memory.losses import DualHandMemoryLoss
 from training.model.sam2_dual_hand_memory import SAM2DualHandMemory
 
 
@@ -303,12 +304,16 @@ def check_memory_gradients(model, images, left_masks, right_masks):
         right_masks,
         prompt_mode="point",
     )
-    tracking_outputs = outputs[1]
-    loss = sum(
-        tracking_outputs[hand]["pred_masks_high_res"].mean()
-        + tracking_outputs[hand]["multistep_pred_ious"][-1].mean()
-        + tracking_outputs[hand]["multistep_object_score_logits"][-1].mean()
-        for hand in ("left", "right")
+    loss, loss_details = DualHandMemoryLoss()(
+        outputs,
+        left_masks,
+        right_masks,
+    )
+    assert torch.isfinite(loss).item()
+    assert all(
+        torch.isfinite(value).item()
+        for hand_details in loss_details.values()
+        for value in hand_details.values()
     )
     loss.backward()
 

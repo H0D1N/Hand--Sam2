@@ -12,6 +12,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 
+from projects.dual_hand_memory.losses import DualHandMemoryLoss, LOSS_NAMES
 from projects.dual_hand_memory.trainer import run_training_epoch, run_validation_epoch
 
 
@@ -31,10 +32,14 @@ class ToySequenceModel(torch.nn.Module):
             for hand in ("left", "right"):
                 logits = self.logit.expand(batch_size, 1, height, width)
                 frame_output[hand] = {
-                    "high_res_masks": logits,
-                    "high_res_multimasks": logits,
-                    "ious": self.logit.expand(batch_size, 1),
-                    "object_score_logits": self.logit.expand(batch_size, 1),
+                    "multistep_pred_multimasks_high_res": [logits],
+                    "multistep_pred_ious": [
+                        self.logit.expand(batch_size, 1)
+                    ],
+                    "multistep_object_score_logits": [
+                        self.logit.expand(batch_size, 1)
+                    ],
+                    "pred_masks_high_res": logits,
                 }
             frame_outputs.append(frame_output)
 
@@ -74,14 +79,14 @@ def build_args():
         amp=False,
         grad_accum_steps=2,
         prompt_mode="point",
-        bce_weight=1.0,
-        dice_weight=1.0,
-        iou_weight=0.1,
-        object_score_weight=1.0,
         log_interval=10,
         output_dir=Path("outputs/test-dual-hand-memory-trainer"),
         skip_visualizations=True,
     )
+
+
+def build_loss_fn():
+    return DualHandMemoryLoss()
 
 
 def check_training_epoch():
@@ -92,6 +97,7 @@ def check_training_epoch():
 
     metrics = run_training_epoch(
         model=model,
+        loss_fn=build_loss_fn(),
         loader=[build_batch(), build_batch(), build_batch()],
         optimizer=optimizer,
         scaler=scaler,
@@ -102,8 +108,8 @@ def check_training_epoch():
 
     expected_keys = {"loss"}
     for hand in ("left", "right"):
-        for name in ("bce", "dice", "iou", "object_score"):
-            expected_keys.add(f"{hand}_{name}_loss")
+        for name in LOSS_NAMES:
+            expected_keys.add(f"{hand}_{name}")
 
     assert model.training
     assert model.calls == [((1, 2, 3, 4, 4), "point")] * 3
@@ -120,7 +126,8 @@ def check_empty_loader():
 
     try:
         run_training_epoch(
-            model=model, loader=[], optimizer=optimizer, scaler=scaler,
+            model=model, loss_fn=build_loss_fn(), loader=[],
+            optimizer=optimizer, scaler=scaler,
             device=torch.device("cpu"), args=build_args(), epoch=0,
         )
     except ValueError as error:
@@ -133,6 +140,7 @@ def check_validation_epoch():
     model = ToySequenceModel()
     metrics = run_validation_epoch(
         model=model,
+        loss_fn=build_loss_fn(),
         loader=[build_batch(), build_batch()],
         device=torch.device("cpu"),
         args=build_args(),
@@ -161,6 +169,7 @@ def check_validation_visualizations():
 
         run_validation_epoch(
             model=ToySequenceModel(),
+            loss_fn=build_loss_fn(),
             loader=[build_batch()],
             device=torch.device("cpu"),
             args=args,
@@ -178,7 +187,8 @@ def check_validation_visualizations():
 def check_empty_validation_loader():
     try:
         run_validation_epoch(
-            model=ToySequenceModel(), loader=[], device=torch.device("cpu"),
+            model=ToySequenceModel(), loss_fn=build_loss_fn(), loader=[],
+            device=torch.device("cpu"),
             args=build_args(), epoch=0,
         )
     except ValueError as error:
