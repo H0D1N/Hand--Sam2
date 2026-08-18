@@ -630,9 +630,15 @@ class SAM2Train(SAM2Base):
         high_res_masks,
         object_score_logits,
         current_out,
+        sam_head=None,
     ):
 
         assert gt_masks is not None
+
+        # 原版使用默认 SAM head；双手模型传入绑定了当前手 Decoder 的 sam_head。
+        if sam_head is None:
+            sam_head = self._forward_sam_heads
+
         all_pred_masks = [low_res_masks]
         all_pred_high_res_masks = [high_res_masks]
         all_pred_multimasks = [low_res_multimasks]
@@ -664,7 +670,7 @@ class SAM2Train(SAM2Base):
             multimask_output = self._use_multimask(is_init_cond_frame, point_inputs)
             if self.use_act_ckpt_iterative_pt_sampling and not multimask_output:
                 sam_outputs = torch.utils.checkpoint.checkpoint(
-                    self._forward_sam_heads,
+                    sam_head,
                     backbone_features=pix_feat_with_mem,
                     point_inputs=point_inputs,
                     mask_inputs=mask_inputs,
@@ -673,7 +679,7 @@ class SAM2Train(SAM2Base):
                     use_reentrant=False,
                 )
             else:
-                sam_outputs = self._forward_sam_heads(
+                sam_outputs = sam_head(
                     backbone_features=pix_feat_with_mem,
                     point_inputs=point_inputs,
                     mask_inputs=mask_inputs,

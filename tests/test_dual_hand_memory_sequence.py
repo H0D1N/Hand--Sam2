@@ -15,19 +15,24 @@ from training.model.sam2_dual_hand_memory import SAM2DualHandMemory
 
 
 IMAGE_SIZE = 128
-OUTPUT_KEYS = {
-    "high_res_multimasks",
-    "ious",
-    "high_res_masks",
-    "object_score_logits",
+MULTISTEP_OUTPUT_KEYS = {
+    "multistep_pred_masks",
+    "multistep_pred_masks_high_res",
+    "multistep_pred_multimasks",
+    "multistep_pred_multimasks_high_res",
+    "multistep_pred_ious",
+    "multistep_point_inputs",
+    "multistep_object_score_logits",
+}
+OUTPUT_KEYS = MULTISTEP_OUTPUT_KEYS | {
+    "pred_masks",
+    "pred_masks_high_res",
     "maskmem_features",
     "maskmem_pos_enc",
 }
 PREDICTION_KEYS = {
-    "high_res_multimasks",
-    "ious",
-    "high_res_masks",
-    "object_score_logits",
+    "pred_masks",
+    "pred_masks_high_res",
 }
 
 
@@ -57,7 +62,13 @@ def check_output_structure(outputs, num_frames):
         assert set(frame_outputs) == {"left", "right"}
         for hand_outputs in frame_outputs.values():
             assert set(hand_outputs) == OUTPUT_KEYS
-            assert hand_outputs["high_res_masks"].shape == (
+            assert hand_outputs["pred_masks"].shape == (
+                1,
+                1,
+                IMAGE_SIZE // 4,
+                IMAGE_SIZE // 4,
+            )
+            assert hand_outputs["pred_masks_high_res"].shape == (
                 1,
                 1,
                 IMAGE_SIZE,
@@ -143,7 +154,10 @@ def check_t2_memory_tracking(model, images, left_masks, right_masks):
 
     for hand, masks in (("left", left_masks), ("right", right_masks)):
         expected_logits = masks[:, 0].float() * 20.0 - 10.0
-        assert torch.equal(first_outputs[0][hand]["high_res_masks"], expected_logits)
+        assert torch.equal(
+            first_outputs[0][hand]["pred_masks_high_res"],
+            expected_logits,
+        )
 
     with torch.inference_mode():
         second_outputs = model(
@@ -162,6 +176,124 @@ def check_t2_memory_tracking(model, images, left_masks, right_masks):
                 ), f"Memory bank leaked: frame={frame_idx}, {hand}.{key}"
 
 
+def register_decoder_counters(model):
+    calls = {"left": 0, "right": 0}
+    handles = []
+
+    for hand in calls:
+        def count_call(_module, _inputs, _output, hand_name=hand):
+            calls[hand_name] += 1
+
+        decoder = getattr(model, f"{hand}_mask_decoder")
+        handles.append(decoder.register_forward_hook(count_call))
+
+    return calls, handles
+
+
+def check_correction_point_sampling(model, images, left_masks, right_masks):
+    model.eval()
+    original_num_correction_points = model.num_correction_pt_per_frame
+    model.num_correction_pt_per_frame = 2
+    calls, handles = register_decoder_counters(model)
+
+    try:
+        with torch.inference_mode():
+            outputs = model(
+                images,
+                left_masks,
+                right_masks,
+                prompt_mode="point",
+            )
+    finally:
+        model.num_correction_pt_per_frame = original_num_correction_points
+        for handle in handles:
+            handle.remove()
+
+    # t=0: one initial prediction + two correction clicks; t=1: tracking once.
+    assert calls == {"left": 4, "right": 4}
+
+    for hand in ("left", "right"):
+        corrected_output = outputs[0][hand]
+        assert MULTISTEP_OUTPUT_KEYS <= set(corrected_output)
+        assert corrected_output["multistep_pred_masks"].shape == (
+            1,
+            3,
+            IMAGE_SIZE // 4,
+            IMAGE_SIZE // 4,
+        )
+        assert corrected_output["multistep_pred_masks_high_res"].shape == (
+            1,
+            3,
+            IMAGE_SIZE,
+            IMAGE_SIZE,
+        )
+        assert len(corrected_output["multistep_pred_multimasks_high_res"]) == 3
+        assert len(corrected_output["multistep_pred_ious"]) == 3
+        assert len(corrected_output["multistep_object_score_logits"]) == 3
+
+        point_steps = corrected_output["multistep_point_inputs"]
+        assert len(point_steps) == 3
+        assert [step["point_coords"].shape for step in point_steps] == [
+            (1, 1, 2),
+            (1, 2, 2),
+            (1, 3, 2),
+        ]
+        assert [step["point_labels"].shape for step in point_steps] == [
+            (1, 1),
+            (1, 2),
+            (1, 3),
+        ]
+
+        assert torch.equal(
+            corrected_output["pred_masks"],
+            corrected_output["multistep_pred_masks"][:, -1:],
+        )
+        assert torch.equal(
+            corrected_output["pred_masks_high_res"],
+            corrected_output["multistep_pred_masks_high_res"][:, -1:],
+        )
+
+
+def check_corrected_frame_becomes_conditioning_memory(
+    model,
+    images,
+    left_masks,
+    right_masks,
+):
+    model.eval()
+    original_num_correction_points = model.num_correction_pt_per_frame
+    original_add_as_cond = model.add_all_frames_to_correct_as_cond
+    model.num_correction_pt_per_frame = 1
+    model.add_all_frames_to_correct_as_cond = True
+
+    try:
+        flat_images = images.transpose(0, 1).flatten(0, 1)
+        backbone_out = model.forward_image(flat_images)
+        backbone_out["batch_size"] = images.size(0)
+        backbone_out["num_frames"] = images.size(1)
+        backbone_out = model.prepare_prompt_inputs(
+            backbone_out,
+            left_masks,
+            right_masks,
+            prompt_mode="point",
+        )
+
+        # t=1 is not an initial conditioning frame, but receives a correction.
+        assert backbone_out["init_cond_frames"] == [0]
+        backbone_out["frames_to_add_correction_pt"] = [0, 1]
+
+        with torch.inference_mode():
+            output_dict = model.forward_tracking(backbone_out, return_dict=True)
+    finally:
+        model.num_correction_pt_per_frame = original_num_correction_points
+        model.add_all_frames_to_correct_as_cond = original_add_as_cond
+
+    for hand in ("left", "right"):
+        assert 1 in output_dict[hand]["cond_frame_outputs"]
+        assert 1 not in output_dict[hand]["non_cond_frame_outputs"]
+        assert "obj_ptr" in output_dict[hand]["cond_frame_outputs"][1]
+
+
 def check_memory_gradients(model, images, left_masks, right_masks):
     model.train()
     model.zero_grad(set_to_none=True)
@@ -173,9 +305,9 @@ def check_memory_gradients(model, images, left_masks, right_masks):
     )
     tracking_outputs = outputs[1]
     loss = sum(
-        tracking_outputs[hand]["high_res_masks"].mean()
-        + tracking_outputs[hand]["ious"].mean()
-        + tracking_outputs[hand]["object_score_logits"].mean()
+        tracking_outputs[hand]["pred_masks_high_res"].mean()
+        + tracking_outputs[hand]["multistep_pred_ious"][-1].mean()
+        + tracking_outputs[hand]["multistep_object_score_logits"][-1].mean()
         for hand in ("left", "right")
     )
     loss.backward()
@@ -236,6 +368,13 @@ def main():
     check_prompt_modes(model, images, left_masks, right_masks)
     check_t1_output(model, images, left_masks, right_masks)
     check_t2_memory_tracking(model, images, left_masks, right_masks)
+    check_correction_point_sampling(model, images, left_masks, right_masks)
+    check_corrected_frame_becomes_conditioning_memory(
+        model,
+        images,
+        left_masks,
+        right_masks,
+    )
     check_memory_gradients(model, images, left_masks, right_masks)
     print("SAM2DualHandMemory sequence forward: OK")
 
