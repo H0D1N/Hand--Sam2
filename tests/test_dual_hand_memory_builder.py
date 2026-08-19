@@ -75,6 +75,30 @@ def check_memory_structure(model):
             assert left_parameter.data_ptr() != right_parameter.data_ptr(), name
 
 
+def check_prompt_sampling_configuration(model):
+    expected = {
+        "prob_to_use_pt_input_for_train": 0.5,
+        "prob_to_use_box_input_for_train": 0.5,
+        "prob_to_sample_from_gt_for_train": 0.1,
+        "num_init_cond_frames_for_train": 2,
+        "rand_init_cond_frames_for_train": True,
+        "num_frames_to_correct_for_train": 2,
+        "rand_frames_to_correct_for_train": True,
+        "add_all_frames_to_correct_as_cond": True,
+        "num_correction_pt_per_frame": 7,
+        "prob_to_use_pt_input_for_eval": 0.0,
+        "prob_to_use_box_input_for_eval": 0.0,
+        "num_init_cond_frames_for_eval": 1,
+        "rand_init_cond_frames_for_eval": False,
+        "num_frames_to_correct_for_eval": 1,
+        "rand_frames_to_correct_for_eval": False,
+        "pt_sampling_for_eval": "center",
+    }
+
+    for name, value in expected.items():
+        assert getattr(model, name) == value, name
+
+
 def check_finetune_configuration(model, finetune_mode):
     configure_memory_training(model, finetune_mode)
 
@@ -182,6 +206,7 @@ def check_official_checkpoint(checkpoint_path, device, finetune_mode):
         for block in model.image_encoder.trunk.blocks
     )
     check_memory_structure(model)
+    check_prompt_sampling_configuration(model)
 
     model_state = model.state_dict()
     for source_key, expected in official_state.items():
@@ -242,6 +267,7 @@ def check_framewise_checkpoint(checkpoint_path, device, finetune_mode):
     assert model.training is True
     assert next(model.parameters()).device == device
     check_memory_structure(model)
+    check_prompt_sampling_configuration(model)
 
     model_state = model.state_dict()
     for source_key, expected in framewise_state.items():

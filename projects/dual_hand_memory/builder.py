@@ -28,6 +28,10 @@ def build_sam2_dual_hand_memory_tiny(
     adapter_dim=64,
     adapter_dropout=0.1,
     adapter_init_scale=1e-3,
+    num_init_cond_frames_for_train=2,
+    num_frames_to_correct_for_train=2,
+    add_all_frames_to_correct_as_cond=True,
+    num_correction_pt_per_frame=7,
 ):
     if (sam_checkpoint is None) == (framewise_checkpoint is None):
         raise ValueError("Exactly one of sam_checkpoint and framewise_checkpoint is required")
@@ -83,10 +87,51 @@ def build_sam2_dual_hand_memory_tiny(
             checkpoint_args=checkpoint_args,
         )
 
+    _configure_prompt_sampling(
+        model=model,
+        num_init_cond_frames_for_train=num_init_cond_frames_for_train,
+        num_frames_to_correct_for_train=num_frames_to_correct_for_train,
+        add_all_frames_to_correct_as_cond=add_all_frames_to_correct_as_cond,
+        num_correction_pt_per_frame=num_correction_pt_per_frame,
+    )
+
     model = model.to(device)
     model.train() if mode == "train" else model.eval()
 
     return model
+
+def _configure_prompt_sampling(
+    model,
+    num_init_cond_frames_for_train,
+    num_frames_to_correct_for_train,
+    add_all_frames_to_correct_as_cond,
+    num_correction_pt_per_frame,
+):
+    """配置双手 Memory baseline 的提示与纠错策略。"""
+
+
+    # 训练：SAM2 原版提示分布。
+    model.prob_to_use_pt_input_for_train = 0.5
+    model.prob_to_use_box_input_for_train = 0.5
+    model.prob_to_sample_from_gt_for_train = 0.1
+
+    model.num_init_cond_frames_for_train = num_init_cond_frames_for_train
+    model.rand_init_cond_frames_for_train = True
+
+    model.num_frames_to_correct_for_train = num_frames_to_correct_for_train
+    model.rand_frames_to_correct_for_train = True
+
+    model.add_all_frames_to_correct_as_cond = add_all_frames_to_correct_as_cond
+    model.num_correction_pt_per_frame = num_correction_pt_per_frame
+
+    # 验证：第 0 帧提供 GT mask，后续帧纯 Memory tracking。
+    model.prob_to_use_pt_input_for_eval = 0.0
+    model.prob_to_use_box_input_for_eval = 0.0
+    model.num_init_cond_frames_for_eval = 1
+    model.rand_init_cond_frames_for_eval = False
+    model.num_frames_to_correct_for_eval = 1
+    model.rand_frames_to_correct_for_eval = False
+    model.pt_sampling_for_eval = "center"
 
 def _initialize_from_sam_checkpoint(
     model,

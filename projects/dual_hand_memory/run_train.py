@@ -19,6 +19,21 @@ from projects.framewise_sam2_modified.utils import (
 )
 
 def parse_args() -> argparse.Namespace:
+    """
+    解析双手 Memory baseline 的训练参数。
+
+    默认 auto 提示策略参考 SAM2：
+    - 训练时约 50% mask、25% box、25% point；
+    - 随机选择最多 2 个初始条件帧和 2 个纠错帧；
+    - 纠错帧加入条件 Memory，每帧追加 7 个纠错点；
+    - 验证时只在第 0 帧提供 GT mask，不模拟纠错。
+
+    以下 SAM2 默认值固定在 Builder 中，不作为命令行参数：
+    - point 输入概率 0.5，point 分支使用 box 的概率 0.5；
+    - 从 GT 区域采样纠错点的概率 0.1；
+    - 随机选择初始条件帧和纠错帧；
+    - num_maskmem=7，Memory 网络结构保持官方配置。
+    """
     parser = argparse.ArgumentParser(description="Train SAM2 with independent left/right hand Memory.")
 
     # 实验与运行环境
@@ -48,7 +63,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter-init-scale", type=float, default=1e-3)
 
     # Prompt
-    parser.add_argument("--prompt-mode", choices=("point", "mask"), default="point")
+    parser.add_argument("--prompt-mode", choices=("point", "mask", "auto"), default="auto")
+    parser.add_argument("--num-init-cond-frames-for-train", type=int, default=2)
+    parser.add_argument("--num-frames-to-correct-for-train", type=int, default=2)
+    parser.add_argument("--add-all-frames-to-correct-as-cond", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--num-correction-pt-per-frame", type=int, default=7)
 
     # Dataset
     dataset_group = parser.add_mutually_exclusive_group(required=True)
@@ -71,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dex-ycb-root", type=Path)
 
     # Clip 与 DataLoader
-    parser.add_argument("--clip-length", type=int, default=2)
+    parser.add_argument("--clip-length", type=int, default=8)
     parser.add_argument("--clip-stride", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--val-batch-size", type=int, default=1)
@@ -122,6 +141,15 @@ def parse_args() -> argparse.Namespace:
         parser.error("--log-interval 必须大于 0")
     if args.tensorboard_log_interval < 1:
         parser.error("--tensorboard-log-interval 必须大于 0")
+    if args.num_correction_pt_per_frame < 0:
+        parser.error("--num-correction-pt-per-frame 不能小于 0")
+    if not (
+        1
+        <= args.num_init_cond_frames_for_train
+        <= args.num_frames_to_correct_for_train
+        <= args.clip_length
+    ):
+        parser.error("必须满足 1 <= 初始条件帧数 <= 纠错帧数 <= clip-length")
 
     return args
 
@@ -163,6 +191,10 @@ def main() -> None:
         adapter_dim=args.adapter_dim,
         adapter_dropout=args.adapter_dropout,
         adapter_init_scale=args.adapter_init_scale,
+        num_init_cond_frames_for_train=args.num_init_cond_frames_for_train,
+        num_frames_to_correct_for_train=args.num_frames_to_correct_for_train,
+        add_all_frames_to_correct_as_cond=args.add_all_frames_to_correct_as_cond,
+        num_correction_pt_per_frame=args.num_correction_pt_per_frame,
     )
     args.image_size = model.image_size
     configure_memory_training(model, args.finetune_mode)

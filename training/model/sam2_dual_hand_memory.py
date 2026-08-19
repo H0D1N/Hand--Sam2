@@ -30,9 +30,9 @@ class SAM2DualHandMemory(SAM2Modified):
         images:      [B, T, 3, H, W]
         left_masks:  [B, T, 1, H, W]
         right_masks: [B, T, 1, H, W]
-        prompt_mode: "point" 或 "mask"
+        prompt_mode: "auto"、"point" 或 "mask"
         """
-        if prompt_mode not in {"point", "mask"}:
+        if prompt_mode not in {"auto", "point", "mask"}:
             raise ValueError(f"不支持的 prompt_mode: {prompt_mode}")
 
         assert images.dim() == 5
