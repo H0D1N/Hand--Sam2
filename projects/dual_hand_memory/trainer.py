@@ -140,7 +140,7 @@ def run_training_epoch(
             loss_details["left"]["loss_class"]
             + loss_details["right"]["loss_class"]
         ) / 2.0
-        if mean_class_loss.detach().item() >= HIGH_CLASS_LOSS_THRESHOLD:
+        if args.debug_high_class_loss and mean_class_loss.detach().item() >= HIGH_CLASS_LOSS_THRESHOLD:
             _log_high_class_loss_batch(
                 batch=batch,
                 frame_outputs=frame_outputs,

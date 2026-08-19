@@ -80,6 +80,7 @@ def build_args():
         grad_accum_steps=2,
         max_grad_norm=0.1,
         prompt_mode="point",
+        debug_high_class_loss=False,
         log_interval=10,
         output_dir=Path("outputs/test-dual-hand-memory-trainer"),
         skip_visualizations=True,

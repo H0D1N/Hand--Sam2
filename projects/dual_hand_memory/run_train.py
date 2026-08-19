@@ -105,7 +105,7 @@ def parse_args() -> argparse.Namespace:
 
     # Optimizer 与 Scheduler
     parser.add_argument("--optimizer", choices=("adam", "adamw", "radam"), default="adamw")
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=5e-6)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--max-grad-norm", type=float, default=0.1)
@@ -120,15 +120,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-visualizations", action="store_true")
     parser.add_argument("--disable-tensorboard", action="store_true")
     parser.add_argument("--tensorboard-log-interval", type=int, default=10)
+    parser.add_argument("--debug-high-class-loss", action="store_true")
 
     args = parser.parse_args()
 
     if args.finetune_mode == "auto":
-        args.finetune_mode = (
-            "decoder-memory"
-            if args.sam_checkpoint is not None
-            else "memory-only"
-        )
+        args.finetune_mode = "decoder-memory"
 
     if args.dataset_mode in {"multiserver", "mixed"} and args.dataset_root is None:
         parser.error("--multiserver/--mixed 需要提供 --dataset-root")
