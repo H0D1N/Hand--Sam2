@@ -572,7 +572,10 @@ class SAM2Train(SAM2Base):
 
         # 可选的用户纠错
         # Optionally, sample correction points iteratively to correct the mask
-        if frame_idx in frames_to_add_correction_pt:
+        if (
+            frame_idx in frames_to_add_correction_pt
+            and self.num_correction_pt_per_frame > 0
+        ):
             point_inputs, final_sam_outputs = self._iter_correct_pt_sampling(
                 is_init_cond_frame,
                 point_inputs,

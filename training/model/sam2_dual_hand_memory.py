@@ -556,7 +556,10 @@ class SAM2DualHandMemory(SAM2Modified):
         }
 
         # 4. 在指定帧上模拟多轮用户纠错。
-        if frame_idx in frames_to_add_correction_pt:
+        if (
+            frame_idx in frames_to_add_correction_pt
+            and self.num_correction_pt_per_frame > 0
+        ):
 
             # 提前固定_forward_one_sam_head 的 mask_decoder, prompt_encoder参数
             sam_head = partial(

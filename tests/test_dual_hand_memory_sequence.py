@@ -255,6 +255,46 @@ def check_correction_point_sampling(model, images, left_masks, right_masks):
         )
 
 
+def check_zero_correction_points(model, images, left_masks, right_masks):
+    model.eval()
+    original_num_correction_points = model.num_correction_pt_per_frame
+    model.num_correction_pt_per_frame = 0
+    calls, handles = register_decoder_counters(model)
+
+    try:
+        with torch.inference_mode():
+            outputs = model(
+                images,
+                left_masks,
+                right_masks,
+                prompt_mode="point",
+            )
+    finally:
+        model.num_correction_pt_per_frame = original_num_correction_points
+        for handle in handles:
+            handle.remove()
+
+    # No correction clicks: each frame only runs its initial prediction.
+    assert calls == {"left": 2, "right": 2}
+
+    for hand in ("left", "right"):
+        output = outputs[0][hand]
+        assert output["multistep_pred_masks"].shape[1] == 1
+        assert output["multistep_pred_masks_high_res"].shape[1] == 1
+        assert len(output["multistep_pred_multimasks_high_res"]) == 1
+        assert len(output["multistep_pred_ious"]) == 1
+        assert len(output["multistep_object_score_logits"]) == 1
+        assert len(output["multistep_point_inputs"]) == 1
+        assert torch.equal(
+            output["pred_masks"],
+            output["multistep_pred_masks"],
+        )
+        assert torch.equal(
+            output["pred_masks_high_res"],
+            output["multistep_pred_masks_high_res"],
+        )
+
+
 def check_corrected_frame_becomes_conditioning_memory(
     model,
     images,
@@ -374,6 +414,7 @@ def main():
     check_t1_output(model, images, left_masks, right_masks)
     check_t2_memory_tracking(model, images, left_masks, right_masks)
     check_correction_point_sampling(model, images, left_masks, right_masks)
+    check_zero_correction_points(model, images, left_masks, right_masks)
     check_corrected_frame_becomes_conditioning_memory(
         model,
         images,
