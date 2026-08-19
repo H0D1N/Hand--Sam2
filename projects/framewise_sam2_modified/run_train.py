@@ -57,6 +57,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--dataset-root", type=Path)
     parser.add_argument("--dataset-names", nargs="+", default=None)
+    parser.add_argument("--frames-per-second", type=float, default=2.0)
     parser.add_argument("--test-seq-count", type=int, default=2)
     parser.add_argument("--dex-ycb-root", type=Path)
 
@@ -101,6 +102,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--tensorboard-log-interval must be >= 1")
     if args.tensorboard_probe_image_size < 1:
         raise ValueError("--tensorboard-probe-image-size must be >= 1")
+    if args.dataset_mode in {"multiserver", "mixed"} and args.dataset_root is None:
+        parser.error("--multiserver/--mixed 需要提供 --dataset-root")
+    if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
+        parser.error("--dexycb/--mixed 需要提供 --dex-ycb-root")
     if args.dataset_mode in {"multiserver", "mixed"} and args.dataset_root is None:
         parser.error("--multiserver/--mixed 需要提供 --dataset-root")
     if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
