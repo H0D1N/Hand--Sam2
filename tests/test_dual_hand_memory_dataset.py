@@ -1,4 +1,6 @@
+import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,7 +20,7 @@ from projects.dual_hand_memory.dataset import (
     collate_clip_batch,
 )
 from projects.dual_hand_memory import dataset as memory_dataset
-from projects.framewise_sam2_modified.dataset import CombinedStreamDataset
+from projects.framewise_sam2_modified.dataset import CombinedStreamDataset, MultiServerDualHandDataset
 
 
 IMAGE_SIZE = 16
@@ -151,10 +153,48 @@ def check_build_dataloaders():
             )
 
 
+def check_invalid_sequences_are_filtered_before_split():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        dataset_root = Path(temp_dir)
+        source_root = dataset_root / "source"
+        config = {"datasets": [{
+            "dataset_name": "test", "data_root": "source",
+            "sequence_glob": "seq-*", "view_glob": "cam-*",
+            "rgb_dir": "{view}/rgb", "mask_dir": "{view}/mask",
+            "mask_values": {"left": 1, "right": 2}, "fps": 30,
+        }]}
+        (dataset_root / "datasets.json").write_text(json.dumps(config), encoding="utf-8")
+
+        for sequence_name in ("seq-00", "seq-01", "seq-02"):
+            image_dir = source_root / sequence_name / "cam-a" / "rgb"
+            mask_dir = source_root / sequence_name / "cam-a" / "mask"
+            image_dir.mkdir(parents=True)
+            mask_dir.mkdir(parents=True)
+            (image_dir / "000001.png").touch()
+            (mask_dir / "000001.png").touch()
+
+        (source_root / "seq-03" / "cam-a").mkdir(parents=True)
+
+        train_dataset = MultiServerDualHandDataset(
+            dataset_root, split="train", test_seq_count=1,
+            image_size=IMAGE_SIZE, dataset_names=["test"],
+        )
+        val_dataset = MultiServerDualHandDataset(
+            dataset_root, split="val", test_seq_count=1,
+            image_size=IMAGE_SIZE, dataset_names=["test"],
+        )
+
+        assert len(train_dataset) == 2
+        assert len(val_dataset) == 1
+        assert "seq-02" in str(val_dataset.samples[0]["image_path"])
+        assert all("seq-03" not in stream_id for stream_id in val_dataset.streams)
+
+
 def main():
     check_consecutive_clips()
     check_mixed_dataset_and_collate()
     check_build_dataloaders()
+    check_invalid_sequences_are_filtered_before_split()
     print("Dual-hand Memory clip dataset: OK")
 
 

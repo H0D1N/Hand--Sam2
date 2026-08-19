@@ -28,6 +28,29 @@ SAM2_MEAN = [0.485, 0.456, 0.406]
 SAM2_STD = [0.229, 0.224, 0.225]
 
 
+def _find_valid_cameras(sequence_dir: Path, dataset_config: dict) -> list[str]:
+    """返回至少包含一对同名图片和 mask 的相机。"""
+
+    view_glob = dataset_config["view_glob"]
+    view_globs = view_glob if isinstance(view_glob, list) else [view_glob]
+    camera_names = sorted(
+        path.name for path in sequence_dir.iterdir()
+        if path.is_dir() and any(path.match(pattern) for pattern in view_globs)
+    )
+    valid_cameras = []
+
+    for camera_name in camera_names:
+        image_dir = sequence_dir / dataset_config["rgb_dir"].format(view=camera_name)
+        mask_dir = sequence_dir / dataset_config["mask_dir"].format(view=camera_name)
+        if image_dir.is_dir() and mask_dir.is_dir() and any(
+            (mask_dir / image_path.name).is_file()
+            for image_path in image_dir.glob("*.png")
+        ):
+            valid_cameras.append(camera_name)
+
+    return valid_cameras
+
+
 def build_train_augmentation(image_size: int):
     """创建同时作用于图片、左手 mask 和右手 mask 的数据增强。"""
     if A is None:
@@ -136,7 +159,7 @@ class MultiServerDualHandDataset(Dataset):
 
         # 3. 得到每个 dataset 对应的 ROM 列表和 cam 名称列表
         seq_dirs_list = []
-        cam_names_list = []
+        cam_names_by_sequence_list = []
 
         for dataset_name in dataset_names:
             dataset_config = dataset_config_by_name[dataset_name]
@@ -162,38 +185,47 @@ class MultiServerDualHandDataset(Dataset):
             if not local_dataset_root.is_dir():
                 raise FileNotFoundError(f"本地数据集目录不存在: {local_dataset_root}")
 
-            sequence_dirs = sorted([
+            sequence_dirs = sorted(
                 path for path in local_dataset_root.glob(dataset_config["sequence_glob"])
                 if path.is_dir()
-            ])
+            )
+            cam_names_by_sequence = {
+                sequence_dir: camera_names
+                for sequence_dir in sequence_dirs
+                if (camera_names := _find_valid_cameras(sequence_dir, dataset_config))
+            }
+            invalid_sequence_dirs = [
+                sequence_dir for sequence_dir in sequence_dirs
+                if sequence_dir not in cam_names_by_sequence
+            ]
 
-            if len(sequence_dirs) <= test_seq_count:
+            for sequence_dir in invalid_sequence_dirs:
+                print(f"[{split.upper()}] 跳过无有效图片-mask对的序列: {sequence_dir}", flush=True)
+
+            valid_sequence_dirs = list(cam_names_by_sequence)
+
+            if len(valid_sequence_dirs) <= test_seq_count:
                 raise ValueError(
-                    f"{dataset_name} 只有 {len(sequence_dirs)} 条序列，"
+                    f"{dataset_name} 只有 {len(valid_sequence_dirs)} 条有效序列，"
                     f"必须大于 test_seq_count={test_seq_count}"
                 )
 
             if split == "train":
-                current_sequence_dirs = sequence_dirs[:-test_seq_count]
+                current_sequence_dirs = valid_sequence_dirs[:-test_seq_count]
             else:
-                current_sequence_dirs = sequence_dirs[-test_seq_count:]
-
-            # 获得视角列表
-            view_glob = dataset_config["view_glob"]
-            view_globs = view_glob if isinstance(view_glob, list) else [view_glob]
-            first_sequence_dir = current_sequence_dirs[0]
-            cam_names = sorted([
-                path.name for path in first_sequence_dir.iterdir()
-                if path.is_dir() and any(
-                    path.match(pattern) for pattern in view_globs
-                )
-            ])
+                current_sequence_dirs = valid_sequence_dirs[-test_seq_count:]
 
             seq_dirs_list.append(current_sequence_dirs)
-            cam_names_list.append(cam_names)
+            cam_names_by_sequence_list.append(cam_names_by_sequence)
+            selected_cameras = sorted({
+                camera_name
+                for sequence_dir in current_sequence_dirs
+                for camera_name in cam_names_by_sequence[sequence_dir]
+            })
             print(
                 f"[{split.upper()}] {dataset_name}: "
-                f"找到 {len(current_sequence_dirs)} 条序列，cam={cam_names}",
+                f"选择序列={[path.name for path in current_sequence_dirs]}，"
+                f"cam={selected_cameras}",
                 flush=True,
             )
 
@@ -203,7 +235,7 @@ class MultiServerDualHandDataset(Dataset):
             sample_count_before = len(self.samples)
 
             for sequence_dir in seq_dirs_list[dataset_index]:
-                for cam_name in cam_names_list[dataset_index]:
+                for cam_name in cam_names_by_sequence_list[dataset_index][sequence_dir]:
                     image_dir = sequence_dir / dataset_config["rgb_dir"].format(
                         view=cam_name
                     )
