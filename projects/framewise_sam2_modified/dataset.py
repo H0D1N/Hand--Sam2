@@ -626,70 +626,52 @@ def build_dataloaders(
         device: torch.device,
 ) -> tuple[DataLoader, DataLoader, FramesPerSecondSampler]:
     """创建训练/验证 Dataset、FPS Sampler 和 DataLoader。"""
-    train_MultiServer_dataset = MultiServerDualHandDataset(
-        dataset_root=args.dataset_root,
-        split="train",
-        test_seq_count=args.test_seq_count,
-        image_size=args.image_size,
-        use_augmentation=not args.disable_augmentation,
-        dataset_names=args.dataset_names,
-    )
 
-    val_MultiServer_dataset = MultiServerDualHandDataset(
-        dataset_root=args.dataset_root,
-        split="val",
-        test_seq_count=args.test_seq_count,
-        image_size=args.image_size,
-        use_augmentation=False,
-        dataset_names=args.dataset_names,
-    )
+    train_frame_datasets = []
+    val_frame_datasets = []
 
-    # 默认只使用 MultiServer。
-    train_dataset = train_MultiServer_dataset
-    val_dataset = val_MultiServer_dataset
+    if args.dataset_mode in {"multiserver", "mixed"}:
+        train_frame_datasets.append(MultiServerDualHandDataset(
+            dataset_root=args.dataset_root, split="train",
+            test_seq_count=args.test_seq_count, image_size=args.image_size,
+            use_augmentation=False, dataset_names=args.dataset_names,
+        ))
+        val_frame_datasets.append(MultiServerDualHandDataset(
+            dataset_root=args.dataset_root, split="val",
+            test_seq_count=args.test_seq_count, image_size=args.image_size,
+            use_augmentation=False, dataset_names=args.dataset_names,
+        ))
 
-    if args.mix_datasets:
-        train_dex_ycb_dataset = DexYCBDataset(
-            dataset_root=args.dex_ycb_root,
-            split="train",
-            setup="s0",
-            image_size=args.image_size,
-            use_augmentation=not args.disable_augmentation,
-        )
+    if args.dataset_mode in {"dexycb", "mixed"}:
+        train_frame_datasets.append(DexYCBDataset(
+            dataset_root=args.dex_ycb_root, split="train", setup="s0",
+            image_size=args.image_size, use_augmentation=False,
+        ))
+        val_frame_datasets.append(DexYCBDataset(
+            dataset_root=args.dex_ycb_root, split="val", setup="s0",
+            image_size=args.image_size, use_augmentation=False,
+        ))
 
-        val_dex_ycb_dataset = DexYCBDataset(
-            dataset_root=args.dex_ycb_root,
-            split="val",
-            setup="s0",
-            image_size=args.image_size,
-            use_augmentation=False,
-        )
-
-        train_dataset = CombinedStreamDataset([
-            train_MultiServer_dataset,
-            train_dex_ycb_dataset,
-        ])
-
-        val_dataset = CombinedStreamDataset([
-            val_MultiServer_dataset,
-            val_dex_ycb_dataset,
-        ])
-
+    if args.dataset_mode == "mixed":
+        train_frame_dataset = CombinedStreamDataset(train_frame_datasets)
+        val_frame_dataset = CombinedStreamDataset(val_frame_datasets)
         logging.info("Dataset mode: MultiServer + DexYCB")
     else:
+        train_frame_dataset = train_frame_datasets[0]
+        val_frame_dataset = val_frame_datasets[0]
         logging.info("Dataset mode: MultiServer only")
 
 
 
     train_sampler = FramesPerSecondSampler(
-        dataset=train_dataset,
+        dataset=train_frame_dataset,
         frames_per_second=args.frames_per_second,
         shuffle=True,
         seed=args.seed,
     )
 
     val_sampler = FramesPerSecondSampler(
-        dataset=val_dataset,
+        dataset=val_frame_dataset,
         frames_per_second=args.frames_per_second,
         shuffle=False,
         seed=args.seed,
@@ -702,7 +684,7 @@ def build_dataloaders(
         raise ValueError("验证 Sampler 没有选出任何样本")
 
     train_loader_kwargs: dict[str, object] = {
-        "dataset": train_dataset,
+        "dataset": train_frame_dataset,
         "batch_size": args.batch_size,
         "sampler": train_sampler,
         "num_workers": args.num_workers,
@@ -713,7 +695,7 @@ def build_dataloaders(
     }
 
     val_loader_kwargs: dict[str, object] = {
-        "dataset": val_dataset,
+        "dataset": val_frame_dataset,
         "batch_size": args.val_batch_size,
         "sampler": val_sampler,
         "num_workers": args.num_workers,

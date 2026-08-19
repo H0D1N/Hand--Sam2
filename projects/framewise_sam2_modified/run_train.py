@@ -40,15 +40,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--multimask-output", action="store_true")
     parser.add_argument("--use-point-prompt", action="store_true")
     
-    # dataset
-    parser.add_argument("--dataset-root", type=Path, required=True)
-    parser.add_argument("--frames-per-second", type=float, default=2.0)
+    # Dataset
+    dataset_group = parser.add_mutually_exclusive_group(required=True)
+    dataset_group.add_argument(
+        "--multiserver", dest="dataset_mode", action="store_const",
+        const="multiserver", help="只使用 MultiServer",
+    )
+    dataset_group.add_argument(
+        "--dexycb", dest="dataset_mode", action="store_const",
+        const="dexycb", help="只使用 DexYCB",
+    )
+    dataset_group.add_argument(
+        "--mixed", dest="dataset_mode", action="store_const",
+        const="mixed", help="同时使用 MultiServer 和 DexYCB",
+    )
+
+    parser.add_argument("--dataset-root", type=Path)
     parser.add_argument("--dataset-names", nargs="+", default=None)
     parser.add_argument("--test-seq-count", type=int, default=2)
-
-    # dex-ycb dataset
-    parser.add_argument("--dex_ycb_root", type=Path, default=None)
-    parser.add_argument("--mix-datasets", action="store_true", help="同时使用 MultiServer 和 DexYCB，默认只使用 MultiServer")
+    parser.add_argument("--dex-ycb-root", type=Path)
 
     # Loss Weights
     parser.add_argument("--bce-weight", type=float, default=1.0)
@@ -91,8 +101,10 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--tensorboard-log-interval must be >= 1")
     if args.tensorboard_probe_image_size < 1:
         raise ValueError("--tensorboard-probe-image-size must be >= 1")
-    if args.mix_datasets and args.dex_ycb_root is None:
-        parser.error("--mix-datasets 需要同时提供 --dex_ycb_root")
+    if args.dataset_mode in {"multiserver", "mixed"} and args.dataset_root is None:
+        parser.error("--multiserver/--mixed 需要提供 --dataset-root")
+    if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
+        parser.error("--dexycb/--mixed 需要提供 --dex-ycb-root")
     return args
 
 def build_optimizer(args: argparse.Namespace, model: torch.nn.Module) -> torch.optim.Optimizer:
