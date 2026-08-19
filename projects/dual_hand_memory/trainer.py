@@ -12,7 +12,81 @@ from .losses import LOSS_NAMES
 from projects.framewise_sam2_modified.losses import iou_target_from_logits, object_targets_from_masks
 from projects.framewise_sam2_modified.utils import upsample_logits
 from projects.framewise_sam2_modified.visualization import save_dual_hand_visualization
-from projects.framewise_sam2_modified.tensorboard_utils import gradient_l2_norm
+
+
+HIGH_CLASS_LOSS_THRESHOLD = 50.0
+
+
+def _log_high_class_loss_batch(
+    batch,
+    frame_outputs,
+    left_masks,
+    right_masks,
+    class_loss,
+    epoch,
+    step,
+):
+    """记录稳定复现高 class loss 所需的样本和逐轮预测。"""
+
+    logging.warning(
+        "High class loss | epoch=%d | step=%d | class_loss=%.4f",
+        epoch + 1,
+        step,
+        class_loss,
+    )
+
+    for sample_idx in range(left_masks.size(0)):
+        metadata = {
+            key: batch[key][sample_idx]
+            for key in ("dataset_name", "stream_id", "sample_id", "image_path")
+            if key in batch
+        }
+        logging.warning("High class loss sample | %s", metadata)
+
+        for hand, masks in (
+            ("left", left_masks),
+            ("right", right_masks),
+        ):
+            gt_present = (
+                masks[sample_idx]
+                .flatten(1)
+                .any(dim=1)
+                .detach()
+                .cpu()
+                .tolist()
+            )
+            object_scores = [
+                [
+                    score[sample_idx].detach().float().item()
+                    for score in output[hand][
+                        "multistep_object_score_logits"
+                    ]
+                ]
+                for output in frame_outputs
+            ]
+            point_labels = [
+                [
+                    None
+                    if point_input is None
+                    else point_input["point_labels"][sample_idx]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                    for point_input in output[hand].get(
+                        "multistep_point_inputs",
+                        [],
+                    )
+                ]
+                for output in frame_outputs
+            ]
+            logging.warning(
+                "High class loss %s | gt_present=%s | "
+                "object_scores=%s | point_labels=%s",
+                hand,
+                gt_present,
+                object_scores,
+                point_labels,
+            )
 
 def run_training_epoch(
     model: torch.nn.Module,
@@ -61,6 +135,21 @@ def run_training_epoch(
 
         if not torch.isfinite(total_loss).item():
             raise FloatingPointError(f"Epoch {epoch + 1}, step {step}: "f"loss={total_loss.detach().item()}")
+
+        mean_class_loss = (
+            loss_details["left"]["loss_class"]
+            + loss_details["right"]["loss_class"]
+        ) / 2.0
+        if mean_class_loss.detach().item() >= HIGH_CLASS_LOSS_THRESHOLD:
+            _log_high_class_loss_batch(
+                batch=batch,
+                frame_outputs=frame_outputs,
+                left_masks=left_masks,
+                right_masks=right_masks,
+                class_loss=mean_class_loss.detach().item(),
+                epoch=epoch,
+                step=step,
+            )
         
 
         # TensorBoard：记录当前训练step的Loss和学习率
@@ -108,11 +197,20 @@ def run_training_epoch(
         should_update = step % grad_accum_steps == 0 or step == num_steps
 
         if should_update:
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                (
+                    parameter
+                    for parameter in model.parameters()
+                    if parameter.requires_grad
+                ),
+                max_norm=args.max_grad_norm,
+            )
+
             if tensorboard_writer is not None:
-                scaler.unscale_(optimizer)
                 tensorboard_writer.add_scalar(
                     "optimizer/gradient_l2_norm",
-                    gradient_l2_norm(model),
+                    grad_norm.detach().item(),
                     global_step,
                 )
 

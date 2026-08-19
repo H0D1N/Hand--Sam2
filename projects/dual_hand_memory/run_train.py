@@ -108,6 +108,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--max-grad-norm", type=float, default=0.1)
     parser.add_argument("--lr-factor", type=float, default=0.5)
     parser.add_argument("--lr-patience", type=int, default=2)
     parser.add_argument("--min-lr", type=float, default=1e-6)
@@ -137,6 +138,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--epochs 必须大于 0")
     if args.grad_accum_steps < 1:
         parser.error("--grad-accum-steps 必须大于 0")
+    if args.max_grad_norm <= 0:
+        parser.error("--max-grad-norm 必须大于 0")
     if args.log_interval < 1:
         parser.error("--log-interval 必须大于 0")
     if args.tensorboard_log_interval < 1:

@@ -78,6 +78,7 @@ def build_args():
     return SimpleNamespace(
         amp=False,
         grad_accum_steps=2,
+        max_grad_norm=0.1,
         prompt_mode="point",
         log_interval=10,
         output_dir=Path("outputs/test-dual-hand-memory-trainer"),
@@ -134,6 +135,30 @@ def check_empty_loader():
         assert "训练 DataLoader 中没有 Clip" in str(error)
     else:
         raise AssertionError("空训练 DataLoader 应当报错")
+
+
+def check_gradient_clipping():
+    model = ToySequenceModel()
+    optimizer = CountingSGD(model.parameters(), lr=1.0)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    args = build_args()
+    args.grad_accum_steps = 1
+    args.max_grad_norm = 0.01
+    initial_logit = model.logit.detach().clone()
+
+    run_training_epoch(
+        model=model,
+        loss_fn=build_loss_fn(),
+        loader=[build_batch()],
+        optimizer=optimizer,
+        scaler=scaler,
+        device=torch.device("cpu"),
+        args=args,
+        epoch=0,
+    )
+
+    parameter_update = (model.logit.detach() - initial_logit).abs().item()
+    assert parameter_update <= args.max_grad_norm + 1e-6
 
 
 def check_validation_epoch():
@@ -200,6 +225,7 @@ def check_empty_validation_loader():
 def main():
     check_training_epoch()
     check_empty_loader()
+    check_gradient_clipping()
     check_validation_epoch()
     check_validation_visualizations()
     check_empty_validation_loader()
