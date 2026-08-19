@@ -405,12 +405,64 @@ def check_prompt_modes(model, images, left_masks, right_masks):
     assert single_frame_inputs["mask_inputs_per_frame"] == {}
 
 
+def check_empty_target_prompt_labels(model, images, left_masks, right_masks):
+    backbone_out = model.forward_image(images[:, 0])
+    backbone_out["batch_size"] = images.size(0)
+    backbone_out["num_frames"] = 1
+    empty_left_masks = torch.zeros_like(left_masks[:, :1])
+    empty_right_masks = torch.zeros_like(right_masks[:, :1])
+
+    original_pt_prob = model.prob_to_use_pt_input_for_train
+    original_box_prob = model.prob_to_use_box_input_for_train
+    model.train()
+
+    try:
+        model.prob_to_use_pt_input_for_train = 1.0
+        model.prob_to_use_box_input_for_train = 0.0
+        point_inputs = model.prepare_prompt_inputs(
+            backbone_out.copy(),
+            empty_left_masks,
+            empty_right_masks,
+            prompt_mode="auto",
+        )["point_inputs_per_frame"][0]
+        assert torch.equal(
+            point_inputs["point_labels"],
+            torch.zeros_like(point_inputs["point_labels"]),
+        )
+
+        model.prob_to_use_box_input_for_train = 1.0
+        box_inputs = model.prepare_prompt_inputs(
+            backbone_out.copy(),
+            empty_left_masks,
+            empty_right_masks,
+            prompt_mode="auto",
+        )["point_inputs_per_frame"][0]
+        assert torch.equal(
+            box_inputs["point_coords"],
+            torch.zeros_like(box_inputs["point_coords"]),
+        )
+        assert torch.equal(
+            box_inputs["point_labels"],
+            -torch.ones_like(box_inputs["point_labels"]),
+        )
+    finally:
+        model.prob_to_use_pt_input_for_train = original_pt_prob
+        model.prob_to_use_box_input_for_train = original_box_prob
+        model.eval()
+
+
 def main():
     torch.manual_seed(0)
     model = build_test_model()
     images, left_masks, right_masks = build_test_inputs()
 
     check_prompt_modes(model, images, left_masks, right_masks)
+    check_empty_target_prompt_labels(
+        model,
+        images,
+        left_masks,
+        right_masks,
+    )
     check_t1_output(model, images, left_masks, right_masks)
     check_t2_memory_tracking(model, images, left_masks, right_masks)
     check_correction_point_sampling(model, images, left_masks, right_masks)

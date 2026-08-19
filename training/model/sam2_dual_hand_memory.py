@@ -161,7 +161,8 @@ class SAM2DualHandMemory(SAM2Modified):
                 - point_labels: Tensor[2B, P]。
 
                 P=1 表示单点，P=2 表示 box。目标不存在时，
-                对应坐标置零、标签设为 -1。
+                单点沿用 SAM2 的负点标签 0；box 无法合法生成，
+                因此坐标置零、标签设为 -1。
 
             mask_inputs_per_frame:
                 dict[int, Tensor[2B, 1, H, W]]。
@@ -281,6 +282,11 @@ class SAM2DualHandMemory(SAM2Modified):
 
             if use_box_input:
                 points, labels = sample_box_points(curr_frame_gt_masks)
+
+                # An empty target has no valid box prompt.
+                present = curr_frame_gt_masks.flatten(1).any(dim=1)
+                points[~present] = 0
+                labels[~present] = -1
             else:
                 points, labels = get_next_point(
                     gt_masks=curr_frame_gt_masks,
@@ -291,10 +297,6 @@ class SAM2DualHandMemory(SAM2Modified):
                         else self.pt_sampling_for_eval
                     ),
                 )
-
-            present = curr_frame_gt_masks.flatten(1).any(dim=1)
-            points[~present] = 0
-            labels[~present] = -1
 
             backbone_out["point_inputs_per_frame"][frame_idx] = {
                 "point_coords": points,
