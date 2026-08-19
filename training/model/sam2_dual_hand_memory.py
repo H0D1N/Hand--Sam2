@@ -70,55 +70,111 @@ class SAM2DualHandMemory(SAM2Modified):
         prompt_mode,
         start_frame_idx=0,
     ):
-        """ 依靠 GT 选择 prompt"""
         """
-        Input:
-        backbone_out[]:
-        | `vision_features` | `[N, 256, 48, 48]` | 最低分辨率主特征，送入 Memory 和 Mask Decoder |
-        | `backbone_fpn[0]` | `[N, 256, 192, 192]` | 1/4 尺度图像特征 |
-        | `backbone_fpn[1]` | `[N, 256, 96, 96]` | 1/8 尺度图像特征 |
-        | `backbone_fpn[2]` | `[N, 256, 48, 48]` | 1/16 尺度图像特征 |
-        | `vision_pos_enc[0]` | `[N, 256, 192, 192]` | 1/4 特征的位置编码 |
-        | `vision_pos_enc[1]` | `[N, 256, 96, 96]` | 1/8 特征的位置编码 |
-        | `vision_pos_enc[2]` | `[N, 256, 48, 48]` | 1/16 特征的位置编码 |
-        | `left_high_res_features[0]` | `[N, 32, 192, 192]` | 左手 Decoder 的高分辨率辅助特征 |
-        | `left_high_res_features[1]` | `[N, 64, 96, 96]` | 左手 Decoder 的高分辨率辅助特征 |
-        | `right_high_res_features[0]` | `[N, 32, 192, 192]` | 右手 Decoder 的高分辨率辅助特征 |
-        | `right_high_res_features[1]` | `[N, 64, 96, 96]` | 右手 Decoder 的高分辨率辅助特征 |
-        # 序列基本信息
-        backbone_out["batch_size"] = batch_size int(B)
-        backbone_out["num_frames"] = num_frames int(T)
+        根据左右手 GT 和提示模式生成序列训练所需的 Prompt 计划。
 
-        Output:
-        上面的基础上再加上
-        
-        # Prompt 生成计划
-        backbone_out["use_pt_input"]  # bool 决定使用 点提示或者框提示 / GT masks 提示
-        backbone_out["init_cond_frames"]          # list[int] 这些帧给prompt
-        backbone_out["frames_not_in_init_cond"]   # list[int] 这些帧依靠memory
-        backbone_out["frames_to_add_correction_pt"]  # list[int] 这些帧允许补充点
+        形状约定：
+            B: batch size；
+            T: 序列帧数；
+            N = T * B: 展平时间和 batch 后的图像数量；
+            (H, W): 输入图像和 GT mask 的空间尺寸；
+            (H4, W4) = (H // 4, W // 4)；
+            (H8, W8) = (H // 8, W // 8)；
+            (H16, W16) = (H // 16, W // 16)。
 
-        # 整理好的GT 和 Prompt 内容 
-        "gt_masks_per_frame": {
-            t: Tensor[2B, 1, 768, 768],
-        },
-        "point_inputs_per_frame": {
-            frame_idx: {
-                "point_coords": Tensor[2B, P, 2],
-                "point_labels": Tensor[2B, P],
-            }
-            ...
-        }
-        "mask_inputs_per_frame": {
-            frame_idx: Tensor[2B, 1, H, W]
-            ...
-        }
-        """
+        该函数不执行跟踪，只负责：
+        1. 将左右手 GT 按帧整理；
+        2. 选择初始条件帧；
+        3. 为条件帧生成 point、box 或 mask prompt；
+        4. 选择后续允许模拟纠错的帧。
 
+        Args:
+            backbone_out:
+                `forward_image()` 的输出，主要包含：
 
-        """
-        left_masks:  [B, T, 1, H, W]
-        right_masks: [B, T, 1, H, W]
+                - vision_features:
+                  Tensor[N, 256, H16, W16]，送入 Memory Attention 和 Mask Decoder 的最低分辨率主特征；
+
+                - backbone_fpn:
+                  长度为 3 的多尺度特征：
+                  1. Tensor[N, 256, H4, W4]；
+                  2. Tensor[N, 256, H8, W8]；
+                  3. Tensor[N, 256, H16, W16]；
+
+                - vision_pos_enc:
+                  与 `backbone_fpn` 三个尺度对应的位置编码：
+                  1. Tensor[N, 256, H4, W4]；
+                  2. Tensor[N, 256, H8, W8]；
+                  3. Tensor[N, 256, H16, W16]；
+
+                - left_high_res_features:
+                  左手 Mask Decoder 使用的高分辨率辅助特征：
+                  1. Tensor[N, 32, H4, W4]；
+                  2. Tensor[N, 64, H8, W8]；
+
+                - right_high_res_features:
+                  右手 Mask Decoder 使用的高分辨率辅助特征：
+                  1. Tensor[N, 32, H4, W4]；
+                  2. Tensor[N, 64, H8, W8]；
+
+                - batch_size: B；
+                - num_frames: T。
+
+                本函数不会修改上述视觉特征，只会向字典中增加
+                GT、Prompt 和帧选择相关字段。
+
+            left_masks:
+                左手 GT，Tensor[B, T, 1, H, W]。
+
+            right_masks:
+                右手 GT，Tensor[B, T, 1, H, W]。
+
+            prompt_mode:
+                提示模式：
+                - "auto": 根据模型的 train/eval 概率选择
+                  mask、box 或 point；
+                - "point": 强制使用单点提示，不采样 box；
+                - "mask": 强制使用完整 GT mask。
+
+            start_frame_idx:
+                开始跟踪的帧下标，该帧始终是第一个条件帧。
+
+        Returns:
+            增加以下字段后的 `backbone_out`：
+
+            gt_masks_per_frame:
+                dict[int, Tensor[2B, 1, H, W]]。
+                每帧前 B 个目标是左手，后 B 个目标是右手。
+
+            use_pt_input:
+                是否使用 point/box prompt。False 表示使用 mask prompt。
+
+            init_cond_frames:
+                list[int]，获得初始人工提示的条件帧。
+
+            frames_not_in_init_cond:
+                list[int]，没有初始提示、需要依靠 Memory 跟踪的帧。
+
+            point_inputs_per_frame:
+                dict[int, dict]，使用 point/box prompt 时保存：
+                - point_coords: Tensor[2B, P, 2]；
+                - point_labels: Tensor[2B, P]。
+
+                P=1 表示单点，P=2 表示 box。目标不存在时，
+                对应坐标置零、标签设为 -1。
+
+            mask_inputs_per_frame:
+                dict[int, Tensor[2B, 1, H, W]]。
+                使用 mask prompt 时保存条件帧的完整 GT mask。
+
+            frames_to_add_correction_pt:
+                list[int]，允许在 `track_step()` 中根据预测误差
+                动态添加纠错点的帧。该函数这里只生成纠错计划，
+                不直接采样纠错点。
+
+        Notes:
+            当 T=1 时，沿用 SAM2 的静态图像训练逻辑，强制使用
+            point prompt，并将唯一一帧同时作为条件帧和纠错帧。
         """
 
         # [B,T,1,H,W] + [B,T,1,H,W]
@@ -423,7 +479,6 @@ class SAM2DualHandMemory(SAM2Modified):
                 长度为 S 的 list，第 s 项为 Tensor[B, M_s]
             - multistep_point_inputs:
                 长度为 S 的 list，第 s 项为 None， 或者：
-                    长度为 S 的 list。第 s 项为 None，或者：
                     {
                         "point_coords": Tensor[B, P_s, 2],
                         "point_labels": Tensor[B, P_s],
