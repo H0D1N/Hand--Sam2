@@ -16,16 +16,16 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from .builder import build_sam2_modified_tiny
-from .dataset import (
+from projects.framewise_sam2_modified.builder import build_sam2_modified_tiny
+from projects.framewise_sam2_modified.dataset import (
     CombinedStreamDataset,
     DexYCBDataset,
     MultiServerDualHandDataset,
     build_center_point_prompt,
     collate_batch,
 )
-from .utils import configure_runtime, dump_json, set_seed, upsample_logits
-from .visualization import save_dual_hand_four_panel_visualization
+from projects.framewise_sam2_modified.utils import configure_runtime, dump_json, set_seed, upsample_logits
+from projects.framewise_sam2_modified.visualization import save_dual_hand_four_panel_visualization
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
