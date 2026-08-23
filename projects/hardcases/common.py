@@ -190,14 +190,19 @@ def analyze_frame(
             or region_precision < REGION_PRECISION_THRESHOLD
             or region_recall < REGION_RECALL_THRESHOLD
         ):
-            contained = (
+            if (
                 region_precision >= REGION_PRECISION_THRESHOLD
                 and region_recall < REGION_RECALL_THRESHOLD
-            ) or (
+            ):
+                reason = "pred_inside_gt"
+            elif (
                 region_recall >= REGION_RECALL_THRESHOLD
                 and region_precision < REGION_PRECISION_THRESHOLD
-            )
-            add_issue("region_error", side, "size_mismatch" if contained else "poor_overlap")
+            ):
+                reason = "gt_inside_pred"
+            else:
+                reason = "poor_overlap"
+            add_issue("region_error", side, reason)
 
         gt_components, gt_largest = _component_metrics(gt[side], gt_area)
         pred_components, pred_largest = _component_metrics(pred[side], gt_area)

@@ -14,7 +14,11 @@ from torch.utils.data import DataLoader
 
 from projects.dual_hand_memory.builder import build_sam2_dual_hand_memory_tiny
 from projects.dual_hand_memory.dataset import ConsecutiveClipDataset, collate_clip_batch
-from projects.framewise_sam2_modified.dataset import MultiServerDualHandDataset
+from projects.framewise_sam2_modified.dataset import (
+    CombinedStreamDataset,
+    DexYCBDataset,
+    MultiServerDualHandDataset,
+)
 from projects.framewise_sam2_modified.utils import (
     configure_runtime,
     dump_json,
@@ -35,7 +39,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Find hard cases in Memory tracking outputs.")
     parser.add_argument("--model-checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--dataset", choices=("multiserver", "dexycb", "mixed"), default=None)
     parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--dex-ycb-root", type=Path)
+    parser.add_argument("--dex-ycb-setup", default="s0")
     parser.add_argument("--dataset-names", nargs="+", default=None)
     parser.add_argument("--test-seq-count", type=int, default=None)
     parser.add_argument("--clip-length", type=int, default=None)
@@ -55,8 +62,10 @@ def load_model(args: argparse.Namespace, device: torch.device) -> torch.nn.Modul
     checkpoint = torch.load(args.model_checkpoint, map_location="cpu", weights_only=False)
     saved_args = checkpoint["args"]
 
-    # 命令行只用于覆盖服务器路径或本次扫描的 clip 长度。
+    # 命令行参数可以覆盖 checkpoint 中的数据配置。
+    args.dataset = args.dataset or saved_args["dataset_mode"]
     args.dataset_root = args.dataset_root or saved_args["dataset_root"]
+    args.dex_ycb_root = args.dex_ycb_root or saved_args["dex_ycb_root"]
     args.dataset_names = args.dataset_names or saved_args["dataset_names"]
     args.test_seq_count = args.test_seq_count or saved_args["test_seq_count"]
     args.clip_length = args.clip_length or saved_args["clip_length"]
@@ -88,6 +97,42 @@ def load_model(args: argparse.Namespace, device: torch.device) -> torch.nn.Modul
     return model.eval()
 
 
+def build_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
+    """按 framewise 的方式选择数据集，再包装成非重叠连续 clips。"""
+
+    datasets = []
+    if args.dataset in {"multiserver", "mixed"}:
+        datasets.append(MultiServerDualHandDataset(
+            dataset_root=args.dataset_root, split="val", test_seq_count=args.test_seq_count,
+            image_size=args.image_size, use_augmentation=False,
+            dataset_names=args.dataset_names,
+        ))
+    if args.dataset in {"dexycb", "mixed"}:
+        datasets.append(DexYCBDataset(
+            dataset_root=args.dex_ycb_root, split="val", setup=args.dex_ycb_setup,
+            image_size=args.image_size, use_augmentation=False,
+        ))
+
+    frame_dataset = datasets[0] if len(datasets) == 1 else CombinedStreamDataset(datasets)
+    clip_dataset = ConsecutiveClipDataset(
+        frame_dataset, clip_length=args.clip_length, clip_stride=args.clip_length,
+    )
+    loader_kwargs = dict(
+        dataset=clip_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False,
+        num_workers=args.num_workers, pin_memory=device.type == "cuda",
+        collate_fn=collate_clip_batch,
+    )
+    if args.num_workers > 0:
+        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
+
+    logging.info(
+        "Validation | dataset=%s | clips=%d | clip_length=%d | tracking_frames=%d",
+        args.dataset, len(clip_dataset), args.clip_length,
+        len(clip_dataset) * (args.clip_length - 1),
+    )
+    return DataLoader(**loader_kwargs)
+
+
 @torch.inference_mode()
 def run_analysis(
     model: torch.nn.Module,
@@ -103,9 +148,15 @@ def run_analysis(
     """
 
     frame_cases, temporal_cases = [], []
-    category_counts, reason_counts = Counter(), Counter()
-    valid_hand_ious = []
-    analyzed_frames, conditioning_frames, temporal_comparisons = 0, 0, 0
+    stats = {
+        name: {
+            "analyzed_frames": 0, "conditioning_frames": 0,
+            "valid_hand_ious": [], "hardcase_frames": 0,
+            "category_counts": Counter(), "reason_counts": Counter(),
+            "temporal_comparisons": 0, "temporal_jumps": 0,
+        }
+        for name in ("overall", "multiserver", "dexycb")
+    }
     use_amp = device.type == "cuda" and args.amp
 
     for step, batch in enumerate(loader, start=1):
@@ -127,6 +178,12 @@ def run_analysis(
 
         for sample_index in range(batch_size):
             # 每个 clip 独立维护 previous，不跨 clip 比较 temporal jump。
+            dataset_group = (
+                "dexycb"
+                if batch["dataset_name"][sample_index].lower() == "dexycb"
+                else "multiserver"
+            )
+            current_stats = (stats["overall"], stats[dataset_group])
             previous = None
             for frame_index, outputs in enumerate(frame_outputs):
                 left_gt = (
@@ -163,33 +220,43 @@ def run_analysis(
 
                 # 第 0 帧直接输入 GT mask，只用于建立 Memory，不进入结果统计。
                 if frame_index == 0:
-                    conditioning_frames += 1
+                    for values in current_stats:
+                        values["conditioning_frames"] += 1
                     previous = current
                     continue
 
-                analyzed_frames += 1
-                valid_hand_ious.extend(
+                frame_ious = [
                     current["metrics"][side]["region_iou"]
                     for side in ("left", "right")
                     if current["metrics"][side]["gt_state"] == "valid"
-                )
+                ]
+                categories = set()
+                reasons = []
                 if record is not None:
                     frame_cases.append(record)
-                    category_counts.update({
+                    categories = {
                         issue["category"]
                         for issue in record["issues"]
-                    })
-                    reason_counts.update(
+                    }
+                    reasons = [
                         f"{issue['category']}/{issue['reason']}"
                         for issue in record["issues"]
-                    )
+                    ]
                     save_frame_case(record, current, args.output_dir)
 
-                temporal_comparisons += 1
                 event = analyze_transition(previous, current)
                 if event is not None:
                     temporal_cases.append(event)
                     save_temporal_case(event, previous, current, args.output_dir)
+
+                for values in current_stats:
+                    values["analyzed_frames"] += 1
+                    values["valid_hand_ious"].extend(frame_ious)
+                    values["hardcase_frames"] += record is not None
+                    values["category_counts"].update(categories)
+                    values["reason_counts"].update(reasons)
+                    values["temporal_comparisons"] += 1
+                    values["temporal_jumps"] += event is not None
                 previous = current
 
         if step % max(args.log_interval, 1) == 0 or step == len(loader):
@@ -197,48 +264,48 @@ def run_analysis(
                 "Scan clips=%d/%d | frames=%d | hardcases=%d | temporal=%d",
                 min(step * args.batch_size, len(loader.dataset)),
                 len(loader.dataset),
-                analyzed_frames,
-                len(frame_cases),
-                len(temporal_cases),
+                stats["overall"]["analyzed_frames"],
+                stats["overall"]["hardcase_frames"],
+                stats["overall"]["temporal_jumps"],
             )
 
-    # 汇总口径与 run_framewise.py 一致，额外记录被排除的条件帧数量。
-    category_rates = ({
-        category: round(count / analyzed_frames, 4)
-        for category, count in category_counts.items()
-    } if analyzed_frames else {})
+    # 三组使用完全相同的统计口径，方便比较总体和两个数据源。
+    summary = {}
+    for name, values in stats.items():
+        analyzed_frames = values["analyzed_frames"]
+        valid_hand_ious = values["valid_hand_ious"]
+        temporal_comparisons = values["temporal_comparisons"]
+        summary[name] = {
+            "analyzed_frames": analyzed_frames,
+            "conditioning_frames": values["conditioning_frames"],
+            "evaluated_hands": len(valid_hand_ious),
+            "hardcase_frames": values["hardcase_frames"],
+            "hardcase_rate": round(values["hardcase_frames"] / analyzed_frames, 4) if analyzed_frames else None,
+            "mean_iou": round(fmean(valid_hand_ious), 4) if valid_hand_ious else None,
+            "median_iou": round(median(valid_hand_ious), 4) if valid_hand_ious else None,
+            "category_counts": dict(values["category_counts"]),
+            "category_rates": {
+                category: round(count / analyzed_frames, 4)
+                for category, count in values["category_counts"].items()
+            } if analyzed_frames else {},
+            "reason_counts": dict(values["reason_counts"]),
+            "temporal_comparisons": temporal_comparisons,
+            "temporal_jumps": values["temporal_jumps"],
+            "temporal_jump_rate": round(values["temporal_jumps"] / temporal_comparisons, 4) if temporal_comparisons else None,
+        }
+
     dump_json({
-        "dataset": "multiserver",
+        "dataset": args.dataset,
         "model_checkpoint": str(args.model_checkpoint),
         "clip_length": args.clip_length,
         "frame_cases": frame_cases,
         "temporal_cases": temporal_cases,
     }, args.output_dir / "hardcases.json")
-    dump_json({
-        "analyzed_frames": analyzed_frames,
-        "conditioning_frames": conditioning_frames,
-        "evaluated_hands": len(valid_hand_ious),
-        "hardcase_frames": len(frame_cases),
-        "hardcase_rate": (
-            round(len(frame_cases) / analyzed_frames, 4)
-            if analyzed_frames else None
-        ),
-        "mean_iou": round(fmean(valid_hand_ious), 4) if valid_hand_ious else None,
-        "median_iou": round(median(valid_hand_ious), 4) if valid_hand_ious else None,
-        "category_counts": dict(category_counts),
-        "category_rates": category_rates,
-        "reason_counts": dict(reason_counts),
-        "temporal_comparisons": temporal_comparisons,
-        "temporal_jumps": len(temporal_cases),
-        "temporal_jump_rate": (
-            round(len(temporal_cases) / temporal_comparisons, 4)
-            if temporal_comparisons else None
-        ),
-    }, args.output_dir / "summary.json")
+    dump_json(summary, args.output_dir / "summary.json")
 
 
 def main() -> None:
-    """组装现有 MultiServer frame dataset、非重叠 clips、模型和分析循环。"""
+    """组装运行环境、模型、validation loader 和分析循环。"""
 
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -247,36 +314,7 @@ def main() -> None:
     device = torch.device(args.device)
     configure_runtime(device, use_tf32=not args.disable_tf32)
     model = load_model(args, device)
-
-    frame_dataset = MultiServerDualHandDataset(
-        dataset_root=args.dataset_root, split="val", test_seq_count=args.test_seq_count,
-        image_size=args.image_size, use_augmentation=False,
-        dataset_names=args.dataset_names,
-    )
-    clip_dataset = ConsecutiveClipDataset(
-        frame_dataset, clip_length=args.clip_length, clip_stride=args.clip_length,
-    )
-
-    loader_kwargs = {
-        "dataset": clip_dataset,
-        "batch_size": args.batch_size,
-        "shuffle": False,
-        "drop_last": False,
-        "num_workers": args.num_workers,
-        "pin_memory": device.type == "cuda",
-        "collate_fn": collate_clip_batch,
-    }
-    if args.num_workers > 0:
-        loader_kwargs["persistent_workers"] = True
-        loader_kwargs["prefetch_factor"] = 2
-    loader = DataLoader(**loader_kwargs)
-
-    logging.info(
-        "Validation | clips=%d | clip_length=%d | tracking_frames=%d",
-        len(clip_dataset),
-        args.clip_length,
-        len(clip_dataset) * (args.clip_length - 1),
-    )
+    loader = build_loader(args, device)
     run_analysis(model, loader, device, args)
     logging.info("Memory hardcase analysis complete: %s", args.output_dir)
 
