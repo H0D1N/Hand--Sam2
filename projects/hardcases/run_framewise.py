@@ -32,6 +32,12 @@ from projects.framewise_sam2_modified.utils import configure_runtime, dump_json,
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATASET_ROOT = REPO_ROOT / "framewise_data/dataset"
+DEFAULT_DATASET_NAMES = (
+    "xingyi_4-5090_oak150-100output",
+    "wuwen_4-5090_release-0623-compressed",
+    "tencent_4-5090_7.5",
+)
 
 MODEL_CONFIG_KEYS = (
     "image_size", "use_image_adapter", "use_decoder_adapter", "adapter_dim",
@@ -44,10 +50,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Find hard cases on validation data.")
 
     parser.add_argument("--dataset", choices=["multiserver", "dexycb", "mixed"], default="multiserver")
-    parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--dex-ycb-root", "--dex_ycb_root", dest="dex_ycb_root", type=Path)
-    parser.add_argument("--dataset-names", nargs="+", default=None)
-    parser.add_argument("--test-seq-count", type=int, default=2)
+    parser.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
+    parser.add_argument("--test-seq-count", type=int, default=3)
     parser.add_argument("--dex-ycb-setup", default="s0")
     parser.add_argument("--image-size", type=int, default=768)
 
@@ -74,8 +80,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-tf32", action="store_true")
     args = parser.parse_args()
 
-    if args.dataset in {"multiserver", "mixed"} and args.dataset_root is None:
-        parser.error(f"--dataset {args.dataset} 需要 --dataset-root")
     if args.dataset in {"dexycb", "mixed"} and args.dex_ycb_root is None:
         parser.error(f"--dataset {args.dataset} 需要 --dex-ycb-root")
     if args.test_seq_count <= 0 or args.batch_size <= 0 or args.num_workers < 0:

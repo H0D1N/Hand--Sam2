@@ -33,18 +33,27 @@ from projects.hardcases.common import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATASET_ROOT = REPO_ROOT / "framewise_data/dataset"
+DEFAULT_DATASET_NAMES = (
+    "xingyi_4-5090_oak150-100output",
+    "wuwen_4-5090_release-0623-compressed",
+    "tencent_4-5090_7.5",
+)
+
+
 def parse_args() -> argparse.Namespace:
-    """解析最小运行参数；模型和数据配置优先从训练 checkpoint 恢复。"""
+    """解析最小运行参数；Memory 模型配置和未指定项从 checkpoint 恢复。"""
 
     parser = argparse.ArgumentParser(description="Find hard cases in Memory tracking outputs.")
     parser.add_argument("--model-checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--dataset", choices=("multiserver", "dexycb", "mixed"), default=None)
-    parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--dex-ycb-root", type=Path)
     parser.add_argument("--dex-ycb-setup", default="s0")
-    parser.add_argument("--dataset-names", nargs="+", default=None)
-    parser.add_argument("--test-seq-count", type=int, default=None)
+    parser.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
+    parser.add_argument("--test-seq-count", type=int, default=3)
     parser.add_argument("--clip-length", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -62,12 +71,9 @@ def load_model(args: argparse.Namespace, device: torch.device) -> torch.nn.Modul
     checkpoint = torch.load(args.model_checkpoint, map_location="cpu", weights_only=False)
     saved_args = checkpoint["args"]
 
-    # 命令行参数可以覆盖 checkpoint 中的数据配置。
+    # 未设置的 Memory 专用配置从 checkpoint 恢复。
     args.dataset = args.dataset or saved_args["dataset_mode"]
-    args.dataset_root = args.dataset_root or saved_args["dataset_root"]
     args.dex_ycb_root = args.dex_ycb_root or saved_args["dex_ycb_root"]
-    args.dataset_names = args.dataset_names or saved_args["dataset_names"]
-    args.test_seq_count = args.test_seq_count or saved_args["test_seq_count"]
     args.clip_length = args.clip_length or saved_args["clip_length"]
 
     model = build_sam2_dual_hand_memory_tiny(
