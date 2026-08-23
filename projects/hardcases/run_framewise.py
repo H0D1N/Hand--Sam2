@@ -8,6 +8,7 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
+from statistics import fmean, median
 from typing import Any
 
 import torch
@@ -88,9 +89,9 @@ class StreamOrderedDataset(Dataset):
     def __init__(self, dataset: Dataset) -> None:
         self.dataset = dataset
         self.records = [
-            (sample_index, stream_id, position)
+            (sample_index, stream_id)
             for stream_id, stream in dataset.streams.items()
-            for position, sample_index in enumerate(stream["sample_indices"])
+            for sample_index in stream["sample_indices"]
         ]
         if len(self.records) != len(dataset):
             raise ValueError("dataset.streams 未覆盖全部 validation 样本")
@@ -99,11 +100,10 @@ class StreamOrderedDataset(Dataset):
         return len(self.records)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        sample_index, stream_id, position = self.records[index]
+        sample_index, stream_id = self.records[index]
         item = dict(self.dataset[sample_index])
         item.update(
             stream_id=stream_id,
-            frame_position=position,
             source_frame_number=_source_frame_number(item["image_path"]),
         )
         return item
@@ -112,7 +112,6 @@ class StreamOrderedDataset(Dataset):
 def hardcase_collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
     result = collate_batch(batch)
     result["stream_id"] = [item["stream_id"] for item in batch]
-    result["frame_position"] = [item["frame_position"] for item in batch]
     result["source_frame_number"] = [item["source_frame_number"] for item in batch]
     return result
 
@@ -184,8 +183,9 @@ def _source_frame_number(image_path: str) -> int | None:
 @torch.inference_mode()
 def run_analysis(model: torch.nn.Module, loader: DataLoader, device: torch.device, args: argparse.Namespace) -> None:
     frame_cases, temporal_cases, previous = [], [], None
-    category_counts, reason_counts, gt_state_counts = Counter(), Counter(), Counter()
-    hardcase_ids, processed_samples = set(), 0
+    category_counts, reason_counts = Counter(), Counter()
+    valid_hand_ious = []
+    processed_samples, temporal_comparisons = 0, 0
     point_prompt = build_center_point_prompt if args.use_point_prompt else None
     use_amp = device.type == "cuda" and args.amp
 
@@ -216,25 +216,34 @@ def run_analysis(model: torch.nn.Module, loader: DataLoader, device: torch.devic
                 batch, index, left_logits, right_logits, left_gt, right_gt,
             )
             processed_samples += 1
-            gt_state_counts.update(current["metrics"][side]["gt_state"] for side in ("left", "right"))
+            valid_hand_ious.extend(
+                current["metrics"][side]["region_iou"]
+                for side in ("left", "right")
+                if current["metrics"][side]["gt_state"] == "valid"
+            )
             if record is not None:
                 frame_cases.append(record)
-                category_counts.update(record["categories"])
+                category_counts.update({
+                    issue["category"]
+                    for issue in record["issues"]
+                })
                 reason_counts.update(
                     f"{issue['category']}/{issue['reason']}"
                     for issue in record["issues"]
                 )
-                hardcase_ids.add((record["dataset_name"], record["sample_id"]))
                 save_frame_case(record, current, args.output_dir)
 
+            if (
+                previous is not None
+                and previous["stream_id"] == current["stream_id"]
+                and previous["source_frame_number"] is not None
+                and current["source_frame_number"]
+                == previous["source_frame_number"] + 1
+            ):
+                temporal_comparisons += 1
             event = analyze_transition(previous, current)
             if event is not None:
                 temporal_cases.append(event)
-                category_counts["temporal_jump"] += 1
-                hardcase_ids.update({
-                    (event["dataset_name"], event["previous_sample_id"]),
-                    (event["dataset_name"], event["current_sample_id"]),
-                })
                 save_temporal_case(event, previous, current, args.output_dir)
             previous = current
 
@@ -245,18 +254,38 @@ def run_analysis(model: torch.nn.Module, loader: DataLoader, device: torch.devic
                 dict(category_counts),
             )
 
+    category_rates = {}
+    if processed_samples:
+        category_rates = {
+            category: round(count / processed_samples, 4)
+            for category, count in category_counts.items()
+        }
     dump_json({
-        "dataset": args.dataset, "dataset_names": args.dataset_names,
-        "test_seq_count": args.test_seq_count, "dex_ycb_setup": args.dex_ycb_setup,
+        "dataset": args.dataset,
         "use_point_prompt": args.use_point_prompt,
         "model_checkpoint": str(args.model_checkpoint) if args.model_checkpoint else None,
-        "frame_hardcases": frame_cases, "temporal_jumps": temporal_cases,
+        "frame_cases": frame_cases,
+        "temporal_cases": temporal_cases,
     }, args.output_dir / "hardcases.json")
     dump_json({
-        "validation_samples": len(loader.dataset), "hardcase_frames": len(hardcase_ids),
-        "frame_hardcases": len(frame_cases), "temporal_jumps": len(temporal_cases),
-        "category_counts": dict(category_counts), "reason_counts": dict(reason_counts),
-        "gt_state_counts": dict(gt_state_counts),
+        "analyzed_frames": processed_samples,
+        "evaluated_hands": len(valid_hand_ious),
+        "hardcase_frames": len(frame_cases),
+        "hardcase_rate": (
+            round(len(frame_cases) / processed_samples, 4)
+            if processed_samples else None
+        ),
+        "mean_iou": round(fmean(valid_hand_ious), 4) if valid_hand_ious else None,
+        "median_iou": round(median(valid_hand_ious), 4) if valid_hand_ious else None,
+        "category_counts": dict(category_counts),
+        "category_rates": category_rates,
+        "reason_counts": dict(reason_counts),
+        "temporal_comparisons": temporal_comparisons,
+        "temporal_jumps": len(temporal_cases),
+        "temporal_jump_rate": (
+            round(len(temporal_cases) / temporal_comparisons, 4)
+            if temporal_comparisons else None
+        ),
     }, args.output_dir / "summary.json")
 
 

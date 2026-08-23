@@ -71,25 +71,25 @@ def _region_metrics(pred: np.ndarray, gt: np.ndarray) -> tuple[float, float, flo
     return float(iou), float(precision), float(recall)
 
 
-def _gt_state(gt_area: int, image_area: int) -> tuple[str, int]:
+def _gt_state(gt_area: int, image_area: int) -> str:
     min_area = max(GT_MIN_AREA_PIXELS, math.ceil(image_area * GT_MIN_AREA_RATIO))
     if gt_area == 0:
-        return "empty", min_area
+        return "empty"
     if gt_area < min_area:
-        return "tiny", min_area
-    return "valid", min_area
+        return "tiny"
+    return "valid"
 
 
-def _prediction_state(pred_area: int, gt_area: int, image_area: int, gt_state: str) -> tuple[str, int]:
+def _prediction_state(pred_area: int, gt_area: int, image_area: int, gt_state: str) -> str:
     if gt_state == "valid":
         min_area = max(PRED_MIN_AREA_PIXELS, math.ceil(gt_area * PRED_MIN_GT_AREA_RATIO))
     else:
         min_area = max(PRED_MIN_AREA_PIXELS, math.ceil(image_area * EMPTY_GT_PRED_MIN_AREA_RATIO))
     if pred_area == 0:
-        return "empty", min_area
+        return "empty"
     if pred_area < min_area:
-        return "tiny", min_area
-    return "valid", min_area
+        return "tiny"
+    return "valid"
 
 
 def _boundary_radius(mask: np.ndarray, ratio: float) -> int:
@@ -153,27 +153,23 @@ def analyze_frame(
     hand_categories = {"left": set(), "right": set()}
     metrics: dict[str, dict[str, Any]] = {}
 
-    def add_issue(category: str, side: str, reason: str, **details: Any) -> None:
+    def add_issue(category: str, side: str, reason: str) -> None:
         issue = {"category": category, "hand": side, "reason": reason}
-        issue.update(details)
         issues.append(issue)
         hand_categories[side].add(category)
 
     for side in ("left", "right"):
         gt_area, pred_area = int(gt[side].sum()), int(pred[side].sum())
         image_area = gt[side].size
-        gt_state, gt_min_area = _gt_state(gt_area, image_area)
-        pred_state, pred_min_area = _prediction_state(pred_area, gt_area, image_area, gt_state)
+        gt_state = _gt_state(gt_area, image_area)
+        pred_state = _prediction_state(pred_area, gt_area, image_area, gt_state)
+        region_iou, region_precision, region_recall = _region_metrics(pred[side], gt[side])
         side_metrics = {
-            "gt_state": gt_state, "pred_state": pred_state, "ignored": gt_state == "tiny",
+            "gt_state": gt_state, "pred_state": pred_state,
             "gt_area": gt_area, "pred_area": pred_area, "image_area": image_area,
-            "gt_min_area": gt_min_area, "pred_min_area": pred_min_area,
-            "region_iou": None, "region_precision": None, "region_recall": None,
-            "boundary_precision": None, "boundary_recall": None, "boundary_f1": None,
-            "boundary_error_ratio": None,
-            "gt_components": None, "pred_components": None,
-            "gt_largest_component_ratio": None, "pred_largest_component_ratio": None,
-            "wrong_hand_ratio": None, "wrong_hand_area": None,
+            "region_iou": region_iou,
+            "region_precision": region_precision,
+            "region_recall": region_recall,
         }
         metrics[side] = side_metrics
 
@@ -181,7 +177,7 @@ def analyze_frame(
             continue
 
         if gt_state == "empty" and pred_state == "valid":
-            add_issue("region_error", side, "mask_without_gt", needs_gt_review=True)
+            add_issue("region_error", side, "mask_without_gt")
             continue
         if gt_state == "empty":
             continue
@@ -189,12 +185,6 @@ def analyze_frame(
             add_issue("region_error", side, "no_mask")
             continue
 
-        region_iou, region_precision, region_recall = _region_metrics(pred[side], gt[side])
-        side_metrics.update(
-            region_iou=region_iou,
-            region_precision=region_precision,
-            region_recall=region_recall,
-        )
         if (
             region_iou < REGION_IOU_THRESHOLD
             or region_precision < REGION_PRECISION_THRESHOLD
@@ -211,12 +201,6 @@ def analyze_frame(
 
         gt_components, gt_largest = _component_metrics(gt[side], gt_area)
         pred_components, pred_largest = _component_metrics(pred[side], gt_area)
-        side_metrics.update(
-            gt_components=gt_components,
-            pred_components=pred_components,
-            gt_largest_component_ratio=gt_largest,
-            pred_largest_component_ratio=pred_largest,
-        )
         fragmented = pred_components > gt_components and (
             pred_largest < LARGEST_COMPONENT_RATIO_THRESHOLD
             or gt_largest - pred_largest > LARGEST_COMPONENT_DROP_THRESHOLD
@@ -232,13 +216,11 @@ def analyze_frame(
             continue
         wrong_area = int(np.logical_and(pred[side], gt[other]).sum())
         wrong_ratio = wrong_area / max(side_metrics["pred_area"], 1)
-        side_metrics["wrong_hand_area"] = wrong_area
-        side_metrics["wrong_hand_ratio"] = wrong_ratio
         if (
             wrong_area >= _minimum_component_area(other_metrics["gt_area"])
             and wrong_ratio >= CROSS_HAND_LEAKAGE_THRESHOLD
         ):
-            add_issue("spatial_error", side, "wrong_hand", target_hand=other)
+            add_issue("spatial_error", side, "wrong_hand")
 
     for side in ("left", "right"):
         side_metrics = metrics[side]
@@ -246,14 +228,8 @@ def analyze_frame(
             continue
         if hand_categories[side] & {"region_error", "spatial_error"}:
             continue
-        boundary_precision, boundary_recall, boundary_f1 = _boundary_metrics(pred[side], gt[side])
+        _, _, boundary_f1 = _boundary_metrics(pred[side], gt[side])
         boundary_error_ratio = _boundary_error_ratio(pred[side], gt[side])
-        side_metrics.update(
-            boundary_precision=boundary_precision,
-            boundary_recall=boundary_recall,
-            boundary_f1=boundary_f1,
-            boundary_error_ratio=boundary_error_ratio,
-        )
         if (
             boundary_f1 < BOUNDARY_F1_THRESHOLD
             and boundary_error_ratio >= BOUNDARY_ERROR_IN_BAND_THRESHOLD
@@ -263,20 +239,18 @@ def analyze_frame(
     state = {
         "dataset_name": batch["dataset_name"][index], "sample_id": batch["sample_id"][index],
         "image_path": batch["image_path"][index], "stream_id": batch["stream_id"][index],
-        "frame_position": batch["frame_position"][index],
         "source_frame_number": batch["source_frame_number"][index],
         "image": batch["original_image"][index],
         "pred": pred, "gt": gt, "metrics": metrics,
     }
     if not issues:
         return None, state
-    categories = sorted({issue["category"] for issue in issues})
     return {
         "dataset_name": state["dataset_name"], "sample_id": state["sample_id"],
-        "image_path": state["image_path"], "stream_id": state["stream_id"],
-        "frame_position": state["frame_position"],
+        "image_path": state["image_path"],
         "source_frame_number": state["source_frame_number"],
-        "categories": categories, "issues": issues, "hands": metrics,
+        "issues": issues,
+        "iou": {side: round(metrics[side]["region_iou"], 4) for side in ("left", "right")},
     }, state
 
 
@@ -292,7 +266,7 @@ def analyze_transition(previous: dict[str, Any] | None, current: dict[str, Any])
     if previous_number is None or current_number != previous_number + 1:
         return None
 
-    hands, score = {}, 0.0
+    hands = {}
     for side in ("left", "right"):
         prev_m, curr_m = previous["metrics"][side], current["metrics"][side]
         if prev_m["gt_state"] != "valid" or curr_m["gt_state"] != "valid":
@@ -312,17 +286,10 @@ def analyze_transition(previous: dict[str, Any] | None, current: dict[str, Any])
         )
         if is_jump:
             hands[side] = {
-                "gt_temporal_iou": gt_iou, "pred_temporal_iou": pred_iou,
-                "excess_change": excess_change,
-                "previous_gt_area": prev_m["gt_area"], "current_gt_area": curr_m["gt_area"],
-                "previous_pred_area": prev_m["pred_area"], "current_pred_area": curr_m["pred_area"],
-                "gt_area_change": gt_area_change, "pred_area_change": pred_area_change,
-                "area_excess": area_excess,
-                "previous_region_iou": prev_m["region_iou"],
-                "current_region_iou": curr_m["region_iou"],
+                "gt_temporal_iou": round(gt_iou, 4),
+                "pred_temporal_iou": round(pred_iou, 4),
+                "area_excess": round(area_excess, 4),
             }
-            score = max(score, excess_change, area_excess)
-
     if not hands:
         return None
     return {
@@ -330,8 +297,7 @@ def analyze_transition(previous: dict[str, Any] | None, current: dict[str, Any])
         "previous_sample_id": previous["sample_id"], "current_sample_id": current["sample_id"],
         "previous_source_frame_number": previous_number,
         "current_source_frame_number": current_number,
-        "previous_frame_position": previous["frame_position"],
-        "current_frame_position": current["frame_position"], "score": score, "hands": hands,
+        "hands": hands,
     }
 
 
@@ -371,4 +337,4 @@ def save_temporal_case(
     )
     _save_four_panel(previous, path / "previous.png")
     _save_four_panel(current, path / "current.png")
-    dump_json(event, path / "metrics.json")
+    dump_json(event["hands"], path / "metrics.json")
