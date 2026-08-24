@@ -231,23 +231,12 @@ def run_analysis(
                     previous = current
                     continue
 
-                frame_ious = [
-                    current["metrics"][side]["region_iou"]
-                    for side in ("left", "right")
-                    if current["metrics"][side]["gt_state"] == "valid"
-                ]
-                categories = set()
-                reasons = []
+                frame_ious = [current["metrics"][side]["region_iou"] for side in ("left", "right") if current["metrics"][side]["gt_state"] == "valid"]
+                categories, reasons = set(), []
                 if record is not None:
                     frame_cases.append(record)
-                    categories = {
-                        issue["category"]
-                        for issue in record["issues"]
-                    }
-                    reasons = [
-                        f"{issue['category']}/{issue['reason']}"
-                        for issue in record["issues"]
-                    ]
+                    categories = {issue["category"] for issue in record["issues"]}
+                    reasons = [f"{issue['category']}/{issue['reason']}" for issue in record["issues"]]
                     save_frame_case(record, current, args.output_dir)
 
                 event = analyze_transition(previous, current)
@@ -290,10 +279,7 @@ def run_analysis(
             "mean_iou": round(fmean(valid_hand_ious), 4) if valid_hand_ious else None,
             "median_iou": round(median(valid_hand_ious), 4) if valid_hand_ious else None,
             "category_counts": dict(values["category_counts"]),
-            "category_rates": {
-                category: round(count / analyzed_frames, 4)
-                for category, count in values["category_counts"].items()
-            } if analyzed_frames else {},
+            "category_rates": {category: round(count / analyzed_frames, 4) for category, count in values["category_counts"].items()} if analyzed_frames else {},
             "reason_counts": dict(values["reason_counts"]),
             "temporal_comparisons": temporal_comparisons,
             "temporal_jumps": values["temporal_jumps"],

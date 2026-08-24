@@ -49,7 +49,7 @@ FRAME_NUMBER_PATTERN = re.compile(r"(\d+)(?!.*\d)")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Find hard cases on validation data.")
 
-    parser.add_argument("--dataset", choices=["multiserver", "dexycb", "mixed"], default="multiserver")
+    parser.add_argument("--dataset", choices=["multiserver", "dexycb", "mixed"], default="mixed")
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--dex-ycb-root", "--dex_ycb_root", dest="dex_ycb_root", type=Path)
     parser.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
@@ -187,9 +187,14 @@ def _source_frame_number(image_path: str) -> int | None:
 @torch.inference_mode()
 def run_analysis(model: torch.nn.Module, loader: DataLoader, device: torch.device, args: argparse.Namespace) -> None:
     frame_cases, temporal_cases, previous = [], [], None
-    category_counts, reason_counts = Counter(), Counter()
-    valid_hand_ious = []
-    processed_samples, temporal_comparisons = 0, 0
+    stats = {
+        name: {
+            "analyzed_frames": 0, "valid_hand_ious": [], "hardcase_frames": 0,
+            "category_counts": Counter(), "reason_counts": Counter(),
+            "temporal_comparisons": 0, "temporal_jumps": 0,
+        }
+        for name in ("overall", "multiserver", "dexycb")
+    }
     point_prompt = build_center_point_prompt if args.use_point_prompt else None
     use_amp = device.type == "cuda" and args.amp
 
@@ -211,6 +216,8 @@ def run_analysis(model: torch.nn.Module, loader: DataLoader, device: torch.devic
 
         batch_size = images.size(0)
         for index in range(batch_size):
+            dataset_group = "dexycb" if batch["dataset_name"][index].lower() == "dexycb" else "multiserver"
+            current_stats = (stats["overall"], stats[dataset_group])
             left_gt = batch["original_left_mask"][index].unsqueeze(0).to(device)
             right_gt = batch["original_right_mask"][index].unsqueeze(0).to(device)
             size = left_gt.shape[-2:]
@@ -219,51 +226,64 @@ def run_analysis(model: torch.nn.Module, loader: DataLoader, device: torch.devic
             record, current = analyze_frame(
                 batch, index, left_logits, right_logits, left_gt, right_gt,
             )
-            processed_samples += 1
-            valid_hand_ious.extend(
-                current["metrics"][side]["region_iou"]
-                for side in ("left", "right")
-                if current["metrics"][side]["gt_state"] == "valid"
-            )
+            frame_ious = [current["metrics"][side]["region_iou"] for side in ("left", "right") if current["metrics"][side]["gt_state"] == "valid"]
+            categories, reasons = set(), []
             if record is not None:
                 frame_cases.append(record)
-                category_counts.update({
-                    issue["category"]
-                    for issue in record["issues"]
-                })
-                reason_counts.update(
-                    f"{issue['category']}/{issue['reason']}"
-                    for issue in record["issues"]
-                )
+                categories = {issue["category"] for issue in record["issues"]}
+                reasons = [f"{issue['category']}/{issue['reason']}" for issue in record["issues"]]
                 save_frame_case(record, current, args.output_dir)
 
-            if (
+            is_temporal_comparison = (
                 previous is not None
                 and previous["stream_id"] == current["stream_id"]
                 and previous["source_frame_number"] is not None
                 and current["source_frame_number"]
                 == previous["source_frame_number"] + 1
-            ):
-                temporal_comparisons += 1
+            )
             event = analyze_transition(previous, current)
             if event is not None:
                 temporal_cases.append(event)
                 save_temporal_case(event, previous, current, args.output_dir)
+
+            for values in current_stats:
+                values["analyzed_frames"] += 1
+                values["valid_hand_ious"].extend(frame_ious)
+                values["hardcase_frames"] += record is not None
+                values["category_counts"].update(categories)
+                values["reason_counts"].update(reasons)
+                values["temporal_comparisons"] += is_temporal_comparison
+                values["temporal_jumps"] += event is not None
             previous = current
 
         if step % max(args.log_interval, 1) == 0 or step == len(loader):
             logging.info(
                 "Scan samples=%d/%d | frame=%d | temporal=%d | categories=%s",
-                processed_samples, len(loader.dataset), len(frame_cases), len(temporal_cases),
-                dict(category_counts),
+                stats["overall"]["analyzed_frames"], len(loader.dataset),
+                stats["overall"]["hardcase_frames"], stats["overall"]["temporal_jumps"],
+                dict(stats["overall"]["category_counts"]),
             )
 
-    category_rates = {}
-    if processed_samples:
-        category_rates = {
-            category: round(count / processed_samples, 4)
-            for category, count in category_counts.items()
+    summary = {}
+    for name, values in stats.items():
+        analyzed_frames = values["analyzed_frames"]
+        valid_hand_ious = values["valid_hand_ious"]
+        temporal_comparisons = values["temporal_comparisons"]
+        summary[name] = {
+            "analyzed_frames": analyzed_frames,
+            "evaluated_hands": len(valid_hand_ious),
+            "hardcase_frames": values["hardcase_frames"],
+            "hardcase_rate": round(values["hardcase_frames"] / analyzed_frames, 4) if analyzed_frames else None,
+            "mean_iou": round(fmean(valid_hand_ious), 4) if valid_hand_ious else None,
+            "median_iou": round(median(valid_hand_ious), 4) if valid_hand_ious else None,
+            "category_counts": dict(values["category_counts"]),
+            "category_rates": {category: round(count / analyzed_frames, 4) for category, count in values["category_counts"].items()} if analyzed_frames else {},
+            "reason_counts": dict(values["reason_counts"]),
+            "temporal_comparisons": temporal_comparisons,
+            "temporal_jumps": values["temporal_jumps"],
+            "temporal_jump_rate": round(values["temporal_jumps"] / temporal_comparisons, 4) if temporal_comparisons else None,
         }
+
     dump_json({
         "dataset": args.dataset,
         "use_point_prompt": args.use_point_prompt,
@@ -271,26 +291,7 @@ def run_analysis(model: torch.nn.Module, loader: DataLoader, device: torch.devic
         "frame_cases": frame_cases,
         "temporal_cases": temporal_cases,
     }, args.output_dir / "hardcases.json")
-    dump_json({
-        "analyzed_frames": processed_samples,
-        "evaluated_hands": len(valid_hand_ious),
-        "hardcase_frames": len(frame_cases),
-        "hardcase_rate": (
-            round(len(frame_cases) / processed_samples, 4)
-            if processed_samples else None
-        ),
-        "mean_iou": round(fmean(valid_hand_ious), 4) if valid_hand_ious else None,
-        "median_iou": round(median(valid_hand_ious), 4) if valid_hand_ious else None,
-        "category_counts": dict(category_counts),
-        "category_rates": category_rates,
-        "reason_counts": dict(reason_counts),
-        "temporal_comparisons": temporal_comparisons,
-        "temporal_jumps": len(temporal_cases),
-        "temporal_jump_rate": (
-            round(len(temporal_cases) / temporal_comparisons, 4)
-            if temporal_comparisons else None
-        ),
-    }, args.output_dir / "summary.json")
+    dump_json(summary, args.output_dir / "summary.json")
 
 
 def main() -> None:
