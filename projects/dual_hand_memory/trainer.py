@@ -11,7 +11,7 @@ from pathlib import Path
 from .losses import LOSS_NAMES
 from projects.framewise_sam2_modified.losses import iou_target_from_logits, object_targets_from_masks
 from projects.framewise_sam2_modified.utils import upsample_logits
-from projects.framewise_sam2_modified.visualization import save_dual_hand_visualization
+from projects.framewise_sam2_modified.visualization import save_dual_hand_memory_comparison_visualization
 
 
 HIGH_CLASS_LOSS_THRESHOLD = 50.0
@@ -266,7 +266,7 @@ def run_validation_epoch(
     device: torch.device,
     args: argparse.Namespace,
     epoch: int,
-    visualization_fn=save_dual_hand_visualization,
+    visualization_fn=save_dual_hand_memory_comparison_visualization,
 ) -> dict[str, float]:
     model.eval()
 
@@ -302,10 +302,11 @@ def run_validation_epoch(
         loss, _ = loss_fn(frame_outputs, left_masks, right_masks,)
 
         batch_size = images.size(0)
+        num_frames = images.size(1)
         total_loss += loss.item() * batch_size
         total_clips += batch_size
+        visual_clip_indices = {}
 
-        
         # [B T C H W]
         # 遍历 T, 某一帧的所有 2B 个预测
         for frame_idx, outputs in enumerate(frame_outputs):
@@ -335,10 +336,8 @@ def run_validation_epoch(
                 original_right_mask = batch["original_right_mask"][sample_idx][frame_idx].unsqueeze(0).to(device)
                 original_size = original_right_mask.shape[-2:]
 
-                left_logits = upsample_logits(
-                    outputs["left"]["pred_masks_high_res"][sample_idx:sample_idx + 1], size=original_size,)
-                right_logits = upsample_logits(
-                    outputs["right"]["pred_masks_high_res"][sample_idx:sample_idx + 1], size=original_size,)
+                left_logits = upsample_logits(outputs["left"]["pred_masks_high_res"][sample_idx:sample_idx + 1], size=original_size)
+                right_logits = upsample_logits(outputs["right"]["pred_masks_high_res"][sample_idx:sample_idx + 1], size=original_size)
 
                 left_iou = iou_target_from_logits(left_logits, original_left_mask)
                 right_iou = iou_target_from_logits(right_logits, original_right_mask)
@@ -357,26 +356,29 @@ def run_validation_epoch(
                     total_foreground_hands += 1
 
                 dataset_name = batch["dataset_name"][sample_idx]
-                num_vis_saved = num_vis_saved_by_dataset.get(dataset_name, 0)
+                if frame_idx == 0:
+                    num_vis_saved = num_vis_saved_by_dataset.get(dataset_name, 0)
+                    if not args.skip_visualizations and num_vis_saved + num_frames <= max_vis_per_dataset:
+                        visual_clip_indices[sample_idx] = num_vis_saved // num_frames
+                        num_vis_saved_by_dataset[dataset_name] = num_vis_saved + num_frames
 
-                if (
-                    not args.skip_visualizations
-                    and num_vis_saved < max_vis_per_dataset
-                ):
+                clip_idx = visual_clip_indices.get(sample_idx)
+                if clip_idx is not None:
+                    no_memory_outputs = model.forward_single_image(images=images[sample_idx, frame_idx:frame_idx + 1], mask_inputs=None, multimask_output=False)
+                    left_no_memory_logits = upsample_logits(no_memory_outputs["left"]["high_res_masks"], size=original_size)
+                    right_no_memory_logits = upsample_logits(no_memory_outputs["right"]["high_res_masks"], size=original_size)
+                    stage = "COND" if frame_idx == 0 else "MEMORY"
                     visualization_fn(
-                        original_image=(
-                            batch["original_image"][sample_idx][frame_idx]
-                        ),
-                        left_pred_mask=(left_logits > 0).float(),
-                        right_pred_mask=(right_logits > 0).float(),
+                        original_image=batch["original_image"][sample_idx][frame_idx],
                         left_gt_mask=original_left_mask,
                         right_gt_mask=original_right_mask,
-                        save_path=(
-                            vis_dir
-                            / f"{batch['sample_id'][sample_idx][frame_idx]}.png"
-                        ),
+                        left_no_memory_mask=left_no_memory_logits > 0,
+                        right_no_memory_mask=right_no_memory_logits > 0,
+                        left_memory_mask=left_logits > 0,
+                        right_memory_mask=right_logits > 0,
+                        title=f"clip {clip_idx:04d} | frame {frame_idx + 1}/{num_frames} | {stage}",
+                        save_path=vis_dir / dataset_name / f"clip_{clip_idx:04d}_frame_{frame_idx:02d}.png",
                     )
-                    num_vis_saved_by_dataset[dataset_name] = num_vis_saved + 1
 
         if step % max(args.log_interval, 1) == 0 or step == len(loader):
             logging.info(

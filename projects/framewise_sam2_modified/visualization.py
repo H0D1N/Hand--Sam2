@@ -23,23 +23,12 @@ def _display_image(img, normalized=False):
 
 def _overlay(img, left=None, right=None, alpha=0.5):
     result = img.clone()
-
-    for mask, color in (
-        (left, (1.0, 0.0, 0.0)),
-        (right, (0.0, 0.0, 1.0)),
-    ):
+    for mask, color in ((left, (1.0, 0.0, 0.0)), (right, (0.0, 0.0, 1.0))):
         if mask is None:
             continue
-
         mask = mask.detach().to(img.device).squeeze().gt(0.5).unsqueeze(0)
         color = img.new_tensor(color).view(3, 1, 1)
-
-        result = torch.where(
-            mask,
-            result * (1.0 - alpha) + color * alpha,
-            result,
-        )
-
+        result = torch.where(mask, result * (1.0 - alpha) + color * alpha, result)
     return result
 
 
@@ -91,14 +80,14 @@ def _to_pil(img):
     return Image.fromarray(array)
 
 
-def _save_pil(image, path):
+def _save(image, path):
+    """保存 Tensor 或 PIL 图片。"""
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(image, torch.Tensor):
+        image = _to_pil(image)
     image.save(path)
-
-
-def _save(img, path):
-    _save_pil(_to_pil(img), path)
 
 
 def _metric(value):
@@ -194,7 +183,35 @@ def save_dual_hand_four_panel_visualization(
     result = Image.new("RGB", (2 * panel_width, 2 * panel_height))
     for panel, position in zip(panels, ((0, 0), (panel_width, 0), (0, panel_height), (panel_width, panel_height))):
         result.paste(panel, position)
-    _save_pil(result, save_path)
+    _save(result, save_path)
+
+
+def save_dual_hand_memory_comparison_visualization(
+    original_image, left_gt_mask, right_gt_mask,
+    left_no_memory_mask, right_no_memory_mask,
+    left_memory_mask, right_memory_mask, title, save_path,
+):
+    """保存左右手 No-Memory 与 Memory 的 2x2 定性对照图。"""
+
+    image = _display_image(original_image)
+    panels = []
+    for label, pred_mask, gt_mask, side in (
+        ("LEFT | NO MEMORY", left_no_memory_mask, left_gt_mask, "left"),
+        ("LEFT | MEMORY", left_memory_mask, left_gt_mask, "left"),
+        ("RIGHT | NO MEMORY", right_no_memory_mask, right_gt_mask, "right"),
+        ("RIGHT | MEMORY", right_memory_mask, right_gt_mask, "right"),
+    ):
+        panel = _overlay(image, left=pred_mask) if side == "left" else _overlay(image, right=pred_mask)
+        gt = gt_mask.detach().to(image.device).float().squeeze().gt(0.5).float()[None, None]
+        boundary = (F.max_pool2d(gt, 5, stride=1, padding=2) + F.max_pool2d(-gt, 5, stride=1, padding=2)).squeeze().gt(0)
+        panel = torch.where(boundary, panel.new_tensor((1.0, 1.0, 0.0)).view(3, 1, 1), panel)
+        panels.append(_labeled_panel(panel, [label, title]))
+
+    panel_width, panel_height = panels[0].size
+    result = Image.new("RGB", (2 * panel_width, 2 * panel_height))
+    for panel, position in zip(panels, ((0, 0), (panel_width, 0), (0, panel_height), (panel_width, panel_height))):
+        result.paste(panel, position)
+    _save(result, save_path)
 
 
 def make_dual_hand_tensorboard_image(

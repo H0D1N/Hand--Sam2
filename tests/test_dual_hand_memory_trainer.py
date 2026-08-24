@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+from PIL import Image
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from projects.dual_hand_memory.losses import DualHandMemoryLoss, LOSS_NAMES
 from projects.dual_hand_memory.trainer import run_training_epoch, run_validation_epoch
+from projects.framewise_sam2_modified.visualization import save_dual_hand_memory_comparison_visualization
 
 
 class ToySequenceModel(torch.nn.Module):
@@ -21,6 +23,7 @@ class ToySequenceModel(torch.nn.Module):
         super().__init__()
         self.logit = torch.nn.Parameter(torch.tensor(-0.2))
         self.calls = []
+        self.single_image_calls = []
 
     def forward(self, images, left_masks, right_masks, prompt_mode):
         self.calls.append((tuple(images.shape), prompt_mode))
@@ -45,6 +48,15 @@ class ToySequenceModel(torch.nn.Module):
 
         return frame_outputs
 
+    def forward_single_image(self, images, mask_inputs=None, multimask_output=False):
+        self.single_image_calls.append(tuple(images.shape))
+        batch_size, _, height, width = images.shape
+        logits = self.logit.expand(batch_size, 1, height, width)
+        return {
+            hand: {"high_res_masks": logits}
+            for hand in ("left", "right")
+        }
+
 
 class CountingSGD(torch.optim.SGD):
     def __init__(self, params, **kwargs):
@@ -56,9 +68,9 @@ class CountingSGD(torch.optim.SGD):
         return super().step(closure)
 
 
-def build_batch():
-    images = torch.zeros(1, 2, 3, 4, 4)
-    left_masks = torch.zeros(1, 2, 1, 4, 4)
+def build_batch(batch_size=1):
+    images = torch.zeros(batch_size, 2, 3, 4, 4)
+    left_masks = torch.zeros(batch_size, 2, 1, 4, 4)
     right_masks = torch.zeros_like(left_masks)
     left_masks[:, :, :, :2, :2] = 1
     right_masks[:, :, :, 2:, 2:] = 1
@@ -66,11 +78,11 @@ def build_batch():
         "image": images,
         "left_mask": left_masks,
         "right_mask": right_masks,
-        "original_image": [[images[0, frame_idx].clone() for frame_idx in range(2)]],
-        "original_left_mask": [[left_masks[0, frame_idx].clone() for frame_idx in range(2)]],
-        "original_right_mask": [[right_masks[0, frame_idx].clone() for frame_idx in range(2)]],
-        "sample_id": [["sample-0", "sample-1"]],
-        "dataset_name": ["test"],
+        "original_image": [[images[i, frame_idx].clone() for frame_idx in range(2)] for i in range(batch_size)],
+        "original_left_mask": [[left_masks[i, frame_idx].clone() for frame_idx in range(2)] for i in range(batch_size)],
+        "original_right_mask": [[right_masks[i, frame_idx].clone() for frame_idx in range(2)] for i in range(batch_size)],
+        "sample_id": [[f"sample-{i}-{frame_idx}" for frame_idx in range(2)] for i in range(batch_size)],
+        "dataset_name": ["test"] * batch_size,
     }
 
 
@@ -175,6 +187,7 @@ def check_validation_epoch():
 
     assert not model.training
     assert model.calls == [((1, 2, 3, 4, 4), "point")] * 2
+    assert model.single_image_calls == []
     assert set(metrics) == {
         "loss", "iou", "dice", "object_accuracy",
         "object_precision", "object_recall", "object_f1",
@@ -193,10 +206,11 @@ def check_validation_visualizations():
         args.output_dir = Path(output_dir)
         args.skip_visualizations = False
 
+        model = ToySequenceModel()
         run_validation_epoch(
-            model=ToySequenceModel(),
+            model=model,
             loss_fn=build_loss_fn(),
-            loader=[build_batch()],
+            loader=[build_batch(batch_size=2)],
             device=torch.device("cpu"),
             args=args,
             epoch=1,
@@ -204,10 +218,37 @@ def check_validation_visualizations():
         )
 
         expected_dir = Path(output_dir) / "visualizations" / "val_epoch_2"
-        assert [call["save_path"].parent for call in calls] == [expected_dir] * 2
+        assert model.single_image_calls == [(1, 3, 4, 4)] * 4
+        assert [call["save_path"].parent for call in calls] == [expected_dir / "test"] * 4
         assert [call["save_path"].name for call in calls] == [
-            "sample-0.png", "sample-1.png",
+            "clip_0000_frame_00.png", "clip_0001_frame_00.png",
+            "clip_0000_frame_01.png", "clip_0001_frame_01.png",
         ]
+        assert [call["title"] for call in calls] == [
+            "clip 0000 | frame 1/2 | COND",
+            "clip 0001 | frame 1/2 | COND",
+            "clip 0000 | frame 2/2 | MEMORY",
+            "clip 0001 | frame 2/2 | MEMORY",
+        ]
+
+
+def check_memory_comparison_png():
+    with tempfile.TemporaryDirectory() as output_dir:
+        image = torch.zeros(3, 16, 16, dtype=torch.uint8)
+        gt = torch.zeros(1, 16, 16)
+        pred = torch.zeros_like(gt)
+        gt[:, 3:10, 3:10] = 1
+        pred[:, 5:12, 5:12] = 1
+        save_path = Path(output_dir) / "comparison.png"
+        save_dual_hand_memory_comparison_visualization(
+            original_image=image, left_gt_mask=gt, right_gt_mask=gt,
+            left_no_memory_mask=pred, right_no_memory_mask=pred,
+            left_memory_mask=gt, right_memory_mask=gt,
+            title="clip 0000 | frame 2/8 | MEMORY", save_path=save_path,
+        )
+        with Image.open(save_path) as result:
+            assert result.width == 32
+            assert result.height > 32
 
 
 def check_empty_validation_loader():
@@ -229,6 +270,7 @@ def main():
     check_gradient_clipping()
     check_validation_epoch()
     check_validation_visualizations()
+    check_memory_comparison_png()
     check_empty_validation_loader()
     print("SAM2DualHandMemory training epoch: OK")
 
