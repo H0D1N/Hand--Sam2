@@ -151,7 +151,7 @@ def build_dataloaders(args, device):
     val_dataset = ConsecutiveClipDataset(
         val_frame_dataset,
         clip_length=args.clip_length,
-        clip_stride=args.clip_stride,
+        clip_stride=args.clip_length,
     )
 
     if len(train_dataset) == 0:

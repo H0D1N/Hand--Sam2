@@ -18,6 +18,13 @@ from projects.framewise_sam2_modified.utils import (
     save_training_curves, set_seed,
 )
 
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SAM_CHECKPOINT = REPO_ROOT / "checkpoints/sam2.1_hiera_tiny.pt"
+DEFAULT_DATASET_ROOT = REPO_ROOT / "framewise_data/dataset"
+DEFAULT_DATASET_NAMES = "xingyi_4-5090_oak150-100output", "wuwen_4-5090_release-0623-compressed", "tencent_4-5090_7.5"
+
+
 def parse_args() -> argparse.Namespace:
     """
     解析双手 Memory baseline 的训练参数。
@@ -45,12 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-tf32", action="store_true")
 
     # 模型初始化
-    init_group = parser.add_mutually_exclusive_group(required=True)
+    init_group = parser.add_mutually_exclusive_group()
     init_group.add_argument("--sam-checkpoint", type=Path)
     init_group.add_argument("--framewise-checkpoint", type=Path)
 
     # Finetune
-    parser.add_argument("--finetune-mode", choices=("auto", "memory-only", "decoder-memory"), default="auto")
+    parser.add_argument("--finetune-mode", choices=("memory-only", "decoder-memory"), default="decoder-memory")
 
     # Prompt
     parser.add_argument("--image-size", type=int, default=768)
@@ -70,23 +77,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-correction-pt-per-frame", type=int, default=7)
 
     # Dataset
-    dataset_group = parser.add_mutually_exclusive_group(required=True)
-    dataset_group.add_argument(
-        "--multiserver", dest="dataset_mode", action="store_const",
-        const="multiserver", help="只使用 MultiServer",
-    )
-    dataset_group.add_argument(
-        "--dexycb", dest="dataset_mode", action="store_const",
-        const="dexycb", help="只使用 DexYCB",
-    )
-    dataset_group.add_argument(
-        "--mixed", dest="dataset_mode", action="store_const",
-        const="mixed", help="同时使用 MultiServer 和 DexYCB",
-    )
+    dataset_group = parser.add_mutually_exclusive_group()
+    dataset_group.add_argument("--multiserver", dest="dataset_mode", action="store_const", const="multiserver", help="只使用 MultiServer")
+    dataset_group.add_argument("--dexycb", dest="dataset_mode", action="store_const", const="dexycb", help="只使用 DexYCB")
+    dataset_group.add_argument("--mixed", dest="dataset_mode", action="store_const", const="mixed", help="同时使用 MultiServer 和 DexYCB")
 
-    parser.add_argument("--dataset-root", type=Path)
-    parser.add_argument("--dataset-names", nargs="+", default=None)
-    parser.add_argument("--test-seq-count", type=int, default=2)
+    parser.set_defaults(dataset_mode="mixed")
+    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
+    parser.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
+    parser.add_argument("--test-seq-count", type=int, default=3)
     parser.add_argument("--dex-ycb-root", type=Path)
 
     # Clip 与 DataLoader
@@ -124,11 +123,9 @@ def parse_args() -> argparse.Namespace:
 
     args = parser.parse_args()
 
-    if args.finetune_mode == "auto":
-        args.finetune_mode = "decoder-memory"
+    if args.sam_checkpoint is None and args.framewise_checkpoint is None:
+        args.sam_checkpoint = DEFAULT_SAM_CHECKPOINT
 
-    if args.dataset_mode in {"multiserver", "mixed"} and args.dataset_root is None:
-        parser.error("--multiserver/--mixed 需要提供 --dataset-root")
     if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
         parser.error("--dexycb/--mixed 需要提供 --dex-ycb-root")
     if args.epochs < 1:
