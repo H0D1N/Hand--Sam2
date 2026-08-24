@@ -68,7 +68,7 @@ class CountingSGD(torch.optim.SGD):
         return super().step(closure)
 
 
-def build_batch(batch_size=1):
+def build_batch(batch_size=1, dataset_names=None):
     images = torch.zeros(batch_size, 2, 3, 4, 4)
     left_masks = torch.zeros(batch_size, 2, 1, 4, 4)
     right_masks = torch.zeros_like(left_masks)
@@ -82,7 +82,7 @@ def build_batch(batch_size=1):
         "original_left_mask": [[left_masks[i, frame_idx].clone() for frame_idx in range(2)] for i in range(batch_size)],
         "original_right_mask": [[right_masks[i, frame_idx].clone() for frame_idx in range(2)] for i in range(batch_size)],
         "sample_id": [[f"sample-{i}-{frame_idx}" for frame_idx in range(2)] for i in range(batch_size)],
-        "dataset_name": ["test"] * batch_size,
+        "dataset_name": dataset_names or ["test"] * batch_size,
     }
 
 
@@ -179,20 +179,22 @@ def check_validation_epoch():
     metrics = run_validation_epoch(
         model=model,
         loss_fn=build_loss_fn(),
-        loader=[build_batch(), build_batch()],
+        loader=[build_batch(batch_size=2, dataset_names=["test", "DexYCB"])],
         device=torch.device("cpu"),
         args=build_args(),
         epoch=0,
     )
 
     assert not model.training
-    assert model.calls == [((1, 2, 3, 4, 4), "point")] * 2
+    assert model.calls == [((2, 2, 3, 4, 4), "point")]
     assert model.single_image_calls == []
-    assert set(metrics) == {
+    assert set(metrics) == {"overall", "multiserver", "dexycb"}
+    metric_names = {
         "loss", "iou", "dice", "object_accuracy",
         "object_precision", "object_recall", "object_f1",
     }
-    assert all(torch.isfinite(torch.tensor(value)).item() for value in metrics.values())
+    assert all(set(group_metrics) == metric_names for group_metrics in metrics.values())
+    assert all(torch.isfinite(torch.tensor(value)).item() for group_metrics in metrics.values() for value in group_metrics.values())
 
 
 def check_validation_visualizations():

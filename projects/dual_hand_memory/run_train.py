@@ -77,12 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-correction-pt-per-frame", type=int, default=7)
 
     # Dataset
-    dataset_group = parser.add_mutually_exclusive_group()
-    dataset_group.add_argument("--multiserver", dest="dataset_mode", action="store_const", const="multiserver", help="只使用 MultiServer")
-    dataset_group.add_argument("--dexycb", dest="dataset_mode", action="store_const", const="dexycb", help="只使用 DexYCB")
-    dataset_group.add_argument("--mixed", dest="dataset_mode", action="store_const", const="mixed", help="同时使用 MultiServer 和 DexYCB")
-
-    parser.set_defaults(dataset_mode="mixed")
+    parser.add_argument("--dataset", dest="dataset_mode", choices=("multiserver", "dexycb", "mixed"), default="mixed")
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
     parser.add_argument("--test-seq-count", type=int, default=3)
@@ -127,7 +122,7 @@ def parse_args() -> argparse.Namespace:
         args.sam_checkpoint = DEFAULT_SAM_CHECKPOINT
 
     if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
-        parser.error("--dexycb/--mixed 需要提供 --dex-ycb-root")
+        parser.error("--dataset dexycb/mixed 需要提供 --dex-ycb-root")
     if args.epochs < 1:
         parser.error("--epochs 必须大于 0")
     if args.grad_accum_steps < 1:
@@ -232,16 +227,17 @@ def main() -> None:
             model=model, loader=val_loader, device=device,
             args=args, epoch=epoch, loss_fn=loss_fn,
         )
-        scheduler.step(val_metrics["loss"])
+        overall_val = val_metrics["overall"]
+        scheduler.step(overall_val["loss"])
 
         current_lr = float(optimizer.param_groups[0]["lr"])
         improved = (
-            val_metrics["iou"]
+            overall_val["iou"]
             > best_val_iou + args.early_stop_min_delta
         )
 
         if improved:
-            best_val_iou = float(val_metrics["iou"])
+            best_val_iou = float(overall_val["iou"])
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
@@ -250,21 +246,15 @@ def main() -> None:
             "epoch": float(epoch + 1),
             "lr": current_lr,
             "train_loss": float(train_metrics["loss"]),
-            "val_loss": float(val_metrics["loss"]),
-            "val_iou": float(val_metrics["iou"]),
-            "val_dice": float(val_metrics["dice"]),
-            "val_object_accuracy": float(val_metrics["object_accuracy"]),
-            "val_object_precision": float(val_metrics["object_precision"]),
-            "val_object_recall": float(val_metrics["object_recall"]),
-            "val_object_f1": float(val_metrics["object_f1"]),
+            "validation": val_metrics,
         }
         history.append(epoch_metrics)
 
         logging.info(
             "Epoch %d | train_loss=%.4f | val_loss=%.4f | "
             "val_iou=%.4f | val_dice=%.4f | lr=%.2e",
-            epoch + 1, train_metrics["loss"], val_metrics["loss"],
-            val_metrics["iou"], val_metrics["dice"], current_lr,
+            epoch + 1, train_metrics["loss"], overall_val["loss"],
+            overall_val["iou"], overall_val["dice"], current_lr,
         )
 
         save_checkpoint(
@@ -297,7 +287,12 @@ def main() -> None:
 
         if not args.skip_visualizations:
             save_training_curves(
-                history,
+                [{
+                    "epoch": row["epoch"], "train_loss": row["train_loss"],
+                    "val_loss": row["validation"]["overall"]["loss"],
+                    "val_iou": row["validation"]["overall"]["iou"],
+                    "val_dice": row["validation"]["overall"]["dice"],
+                } for row in history],
                 args.output_dir / "visualizations" / "training_curves.png",
             )
 
@@ -310,12 +305,10 @@ def main() -> None:
                     epoch + 1,
                 )
 
-            for name, value in val_metrics.items():
-                writer.add_scalar(
-                    f"validation/{name}",
-                    value,
-                    epoch + 1,
-                )
+            for group, metrics in val_metrics.items():
+                for name, value in metrics.items():
+                    if value is not None:
+                        writer.add_scalar(f"validation/{group}/{name}", value, epoch + 1)
 
             writer.flush()
 
