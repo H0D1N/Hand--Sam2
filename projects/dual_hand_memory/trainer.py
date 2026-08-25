@@ -9,9 +9,13 @@ from torch.utils.data import DataLoader
 from pathlib import Path
 
 from .losses import LOSS_NAMES
+from projects.framewise_sam2_modified.dataset import build_center_point_prompt
 from projects.framewise_sam2_modified.losses import iou_target_from_logits, object_targets_from_masks
 from projects.framewise_sam2_modified.utils import upsample_logits
-from projects.framewise_sam2_modified.visualization import save_dual_hand_memory_comparison_visualization
+from projects.framewise_sam2_modified.visualization import (
+    save_dual_hand_correction_visualization,
+    save_dual_hand_memory_comparison_visualization,
+)
 
 
 HIGH_CLASS_LOSS_THRESHOLD = 50.0
@@ -98,6 +102,7 @@ def run_training_epoch(
     args: argparse.Namespace,
     epoch: int,
     tensorboard_writer=None,
+    visualization_fn=save_dual_hand_correction_visualization,
 ) -> dict[str, float]:
     model.train()
 
@@ -106,6 +111,12 @@ def run_training_epoch(
     num_steps = len(loader)
     grad_accum_steps = args.grad_accum_steps
     amp_enabled = device.type == "cuda" and args.amp
+
+    max_vis_per_dataset = 100
+    vis_dir = Path(args.output_dir) / "visualizations" / f"train_epoch_{epoch + 1}"
+    num_vis_saved_by_dataset, num_sequences_by_dataset = {}, {}
+    if not args.skip_visualizations:
+        vis_dir.mkdir(parents=True, exist_ok=True)
 
     optimizer.zero_grad(set_to_none=True)
 
@@ -218,7 +229,7 @@ def run_training_epoch(
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
-        batch_size = images.size(0)
+        batch_size, num_frames = images.shape[:2]
         total_clips += batch_size
         loss_sums["loss"] += total_loss.detach().item() * batch_size
 
@@ -226,6 +237,47 @@ def run_training_epoch(
             for name, value in hand_details.items():
                 key = f"{hand}_{name}"
                 loss_sums[key] = loss_sums.get(key, 0.0) + value.detach().item() * batch_size
+
+
+        # 训练纠错可视化：只保存含纠错的完整 sequence，不额外 forward。
+        if not args.skip_visualizations:
+            for sample_idx, dataset_name in enumerate(batch["dataset_name"]):
+                step_counts = [outputs["left"]["multistep_pred_masks_high_res"].size(1) for outputs in frame_outputs]
+                num_images = sum(step_counts)
+                num_saved = num_vis_saved_by_dataset.get(dataset_name, 0)
+                if max(step_counts) == 1 or num_saved + num_images > max_vis_per_dataset:
+                    continue
+
+                sequence_idx = num_sequences_by_dataset.get(dataset_name, 0)
+                for frame_idx, (outputs, step_count) in enumerate(zip(frame_outputs, step_counts)):
+                    left_points = outputs["left"]["multistep_point_inputs"]
+                    right_points = outputs["right"]["multistep_point_inputs"]
+                    left_initial = 0 if left_points[0] is None else left_points[0]["point_labels"].size(1)
+                    right_initial = 0 if right_points[0] is None else right_points[0]["point_labels"].size(1)
+
+                    for correction_step in range(step_count):
+                        left_logits = outputs["left"]["multistep_pred_masks_high_res"][sample_idx:sample_idx + 1, correction_step:correction_step + 1]
+                        right_logits = outputs["right"]["multistep_pred_masks_high_res"][sample_idx:sample_idx + 1, correction_step:correction_step + 1]
+                        left_gt = left_masks[sample_idx:sample_idx + 1, frame_idx]
+                        right_gt = right_masks[sample_idx:sample_idx + 1, frame_idx]
+                        left_point_input = None if left_points[correction_step] is None else {name: value[sample_idx] for name, value in left_points[correction_step].items()}
+                        right_point_input = None if right_points[correction_step] is None else {name: value[sample_idx] for name, value in right_points[correction_step].items()}
+                        stage = "NO CORRECTION" if step_count == 1 else "BEFORE CORRECTION" if correction_step == 0 else f"CORRECTION {correction_step}/{step_count - 1}"
+                        visualization_fn(
+                            normalized_image=images[sample_idx, frame_idx],
+                            left_gt_mask=left_gt, right_gt_mask=right_gt,
+                            left_pred_mask=left_logits > 0, right_pred_mask=right_logits > 0,
+                            left_point_input=left_point_input, right_point_input=right_point_input,
+                            left_initial_points=left_initial, right_initial_points=right_initial,
+                            left_iou=iou_target_from_logits(left_logits, left_gt).item(),
+                            right_iou=iou_target_from_logits(right_logits, right_gt).item(),
+                            title=f"frame {frame_idx + 1}/{num_frames} | {stage}",
+                            save_path=vis_dir / dataset_name / f"sequence_{sequence_idx:04d}_frame_{frame_idx:02d}_step_{correction_step:02d}.png",
+                        )
+
+                num_vis_saved_by_dataset[dataset_name] = num_saved + num_images
+                num_sequences_by_dataset[dataset_name] = sequence_idx + 1
+
 
         if step % args.log_interval == 0 or step == num_steps:
             mean_details = {
@@ -310,7 +362,7 @@ def run_validation_epoch(
             group_loss = loss if len(sample_indices) == batch_size else loss_fn(frame_outputs, left_masks, right_masks, sample_indices=sample_indices)[0]
             stats[dataset_group]["loss_sum"] += group_loss.item() * len(sample_indices)
             stats[dataset_group]["clips"] += len(sample_indices)
-        visual_clip_indices = {}
+        visual_sequence_indices = {}
 
         # [B T C H W]
         # 遍历 T, 某一帧的所有 2B 个预测
@@ -370,14 +422,23 @@ def run_validation_epoch(
                 if frame_idx == 0:
                     num_vis_saved = num_vis_saved_by_dataset.get(dataset_name, 0)
                     if not args.skip_visualizations and num_vis_saved + num_frames <= max_vis_per_dataset:
-                        visual_clip_indices[sample_idx] = num_vis_saved // num_frames
+                        visual_sequence_indices[sample_idx] = num_vis_saved // num_frames
                         num_vis_saved_by_dataset[dataset_name] = num_vis_saved + num_frames
 
-                clip_idx = visual_clip_indices.get(sample_idx)
-                if clip_idx is not None:
-                    no_memory_outputs = model.forward_single_image(images=images[sample_idx, frame_idx:frame_idx + 1], mask_inputs=None, multimask_output=False)
+                sequence_idx = visual_sequence_indices.get(sample_idx)
+                if sequence_idx is not None:
+                    left_points = build_center_point_prompt(left_masks[sample_idx, frame_idx:frame_idx + 1])
+                    right_points = build_center_point_prompt(right_masks[sample_idx, frame_idx:frame_idx + 1])
+                    no_memory_outputs = model.forward_single_image(
+                        images=images[sample_idx, frame_idx:frame_idx + 1],
+                        left_point_inputs=left_points, right_point_inputs=right_points,
+                        mask_inputs=None, multimask_output=False,
+                    )
                     left_no_memory_logits = upsample_logits(no_memory_outputs["left"]["high_res_masks"], size=original_size)
                     right_no_memory_logits = upsample_logits(no_memory_outputs["right"]["high_res_masks"], size=original_size)
+                    point_scale = images.new_tensor((original_size[1] / images.size(-1), original_size[0] / images.size(-2)))
+                    left_point = None if left_points["point_labels"].item() < 0 else left_points["point_coords"][0, 0] * point_scale
+                    right_point = None if right_points["point_labels"].item() < 0 else right_points["point_coords"][0, 0] * point_scale
                     stage = "COND" if frame_idx == 0 else "MEMORY"
                     visualization_fn(
                         original_image=batch["original_image"][sample_idx][frame_idx],
@@ -387,8 +448,10 @@ def run_validation_epoch(
                         right_no_memory_mask=right_no_memory_logits > 0,
                         left_memory_mask=left_logits > 0,
                         right_memory_mask=right_logits > 0,
-                        title=f"clip {clip_idx:04d} | frame {frame_idx + 1}/{num_frames} | {stage}",
-                        save_path=vis_dir / dataset_name / f"clip_{clip_idx:04d}_frame_{frame_idx:02d}.png",
+                        left_no_memory_point=left_point,
+                        right_no_memory_point=right_point,
+                        title=f"sequence {sequence_idx:04d} | frame {frame_idx + 1}/{num_frames} | {stage}",
+                        save_path=vis_dir / dataset_name / f"sequence_{sequence_idx:04d}_frame_{frame_idx:02d}_step_00.png",
                     )
 
         if step % max(args.log_interval, 1) == 0 or step == len(loader):

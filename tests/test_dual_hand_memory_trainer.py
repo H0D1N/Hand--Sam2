@@ -15,41 +15,52 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from projects.dual_hand_memory.losses import DualHandMemoryLoss, LOSS_NAMES
 from projects.dual_hand_memory.trainer import run_training_epoch, run_validation_epoch
-from projects.framewise_sam2_modified.visualization import save_dual_hand_memory_comparison_visualization
+from projects.framewise_sam2_modified.visualization import (
+    save_dual_hand_correction_visualization,
+    save_dual_hand_memory_comparison_visualization,
+)
 
 
 class ToySequenceModel(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, correction_frames=(), correction_steps=3):
         super().__init__()
         self.logit = torch.nn.Parameter(torch.tensor(-0.2))
         self.calls = []
         self.single_image_calls = []
+        self.correction_frames = set(correction_frames)
+        self.correction_steps = correction_steps
 
     def forward(self, images, left_masks, right_masks, prompt_mode):
         self.calls.append((tuple(images.shape), prompt_mode))
         batch_size, num_frames, _, height, width = images.shape
         frame_outputs = []
 
-        for _ in range(num_frames):
+        for frame_idx in range(num_frames):
             frame_output = {}
+            num_steps = self.correction_steps if frame_idx in self.correction_frames else 1
             for hand in ("left", "right"):
                 logits = self.logit.expand(batch_size, 1, height, width)
+                point_inputs = [None] + [
+                    {
+                        "point_coords": torch.zeros(batch_size, step, 2, device=images.device),
+                        "point_labels": torch.ones(batch_size, step, dtype=torch.long, device=images.device),
+                    }
+                    for step in range(1, num_steps)
+                ]
                 frame_output[hand] = {
-                    "multistep_pred_multimasks_high_res": [logits],
-                    "multistep_pred_ious": [
-                        self.logit.expand(batch_size, 1)
-                    ],
-                    "multistep_object_score_logits": [
-                        self.logit.expand(batch_size, 1)
-                    ],
+                    "multistep_pred_masks_high_res": self.logit.expand(batch_size, num_steps, height, width),
+                    "multistep_pred_multimasks_high_res": [logits] * num_steps,
+                    "multistep_pred_ious": [self.logit.expand(batch_size, 1)] * num_steps,
+                    "multistep_point_inputs": point_inputs,
+                    "multistep_object_score_logits": [self.logit.expand(batch_size, 1)] * num_steps,
                     "pred_masks_high_res": logits,
                 }
             frame_outputs.append(frame_output)
 
         return frame_outputs
 
-    def forward_single_image(self, images, mask_inputs=None, multimask_output=False):
-        self.single_image_calls.append(tuple(images.shape))
+    def forward_single_image(self, images, mask_inputs=None, multimask_output=False, left_point_inputs=None, right_point_inputs=None):
+        self.single_image_calls.append((tuple(images.shape), left_point_inputs, right_point_inputs))
         batch_size, _, height, width = images.shape
         logits = self.logit.expand(batch_size, 1, height, width)
         return {
@@ -174,6 +185,34 @@ def check_gradient_clipping():
     assert parameter_update <= args.max_grad_norm + 1e-6
 
 
+def check_training_visualizations():
+    calls = []
+
+    with tempfile.TemporaryDirectory() as output_dir:
+        args = build_args()
+        args.output_dir = Path(output_dir)
+        args.skip_visualizations = False
+        args.grad_accum_steps = 1
+        model = ToySequenceModel(correction_frames=(0,))
+        optimizer = CountingSGD(model.parameters(), lr=0.1)
+        run_training_epoch(
+            model=model, loss_fn=build_loss_fn(), loader=[build_batch()], optimizer=optimizer,
+            scaler=torch.amp.GradScaler("cuda", enabled=False), device=torch.device("cpu"),
+            args=args, epoch=1, visualization_fn=lambda **kwargs: calls.append(kwargs),
+        )
+
+        expected_dir = Path(output_dir) / "visualizations" / "train_epoch_2" / "test"
+        assert [call["save_path"].parent for call in calls] == [expected_dir] * 4
+        assert [call["save_path"].name for call in calls] == [
+            "sequence_0000_frame_00_step_00.png", "sequence_0000_frame_00_step_01.png",
+            "sequence_0000_frame_00_step_02.png", "sequence_0000_frame_01_step_00.png",
+        ]
+        assert [call["title"] for call in calls] == [
+            "frame 1/2 | BEFORE CORRECTION", "frame 1/2 | CORRECTION 1/2",
+            "frame 1/2 | CORRECTION 2/2", "frame 2/2 | NO CORRECTION",
+        ]
+
+
 def check_validation_epoch():
     model = ToySequenceModel()
     metrics = run_validation_epoch(
@@ -220,17 +259,18 @@ def check_validation_visualizations():
         )
 
         expected_dir = Path(output_dir) / "visualizations" / "val_epoch_2"
-        assert model.single_image_calls == [(1, 3, 4, 4)] * 4
+        assert [call[0] for call in model.single_image_calls] == [(1, 3, 4, 4)] * 4
+        assert all(call[1] is not None and call[2] is not None for call in model.single_image_calls)
         assert [call["save_path"].parent for call in calls] == [expected_dir / "test"] * 4
         assert [call["save_path"].name for call in calls] == [
-            "clip_0000_frame_00.png", "clip_0001_frame_00.png",
-            "clip_0000_frame_01.png", "clip_0001_frame_01.png",
+            "sequence_0000_frame_00_step_00.png", "sequence_0001_frame_00_step_00.png",
+            "sequence_0000_frame_01_step_00.png", "sequence_0001_frame_01_step_00.png",
         ]
         assert [call["title"] for call in calls] == [
-            "clip 0000 | frame 1/2 | COND",
-            "clip 0001 | frame 1/2 | COND",
-            "clip 0000 | frame 2/2 | MEMORY",
-            "clip 0001 | frame 2/2 | MEMORY",
+            "sequence 0000 | frame 1/2 | COND",
+            "sequence 0001 | frame 1/2 | COND",
+            "sequence 0000 | frame 2/2 | MEMORY",
+            "sequence 0001 | frame 2/2 | MEMORY",
         ]
 
 
@@ -246,11 +286,26 @@ def check_memory_comparison_png():
             original_image=image, left_gt_mask=gt, right_gt_mask=gt,
             left_no_memory_mask=pred, right_no_memory_mask=pred,
             left_memory_mask=gt, right_memory_mask=gt,
+            left_no_memory_point=torch.tensor([8.0, 8.0]),
+            right_no_memory_point=torch.tensor([8.0, 8.0]),
             title="clip 0000 | frame 2/8 | MEMORY", save_path=save_path,
         )
         with Image.open(save_path) as result:
             assert result.width == 32
             assert result.height > 32
+
+        correction_path = Path(output_dir) / "correction.png"
+        point_input = {"point_coords": torch.tensor([[8.0, 8.0]]), "point_labels": torch.tensor([1])}
+        save_dual_hand_correction_visualization(
+            normalized_image=image.float(), left_gt_mask=gt, right_gt_mask=gt,
+            left_pred_mask=pred, right_pred_mask=pred,
+            left_point_input=point_input, right_point_input=point_input,
+            left_initial_points=0, right_initial_points=0,
+            left_iou=0.5, right_iou=0.5, title="frame 1/2 | CORRECTION 1/2", save_path=correction_path,
+        )
+        with Image.open(correction_path) as result:
+            assert result.width == 32
+            assert result.height > 16
 
 
 def check_empty_validation_loader():
@@ -270,6 +325,7 @@ def main():
     check_training_epoch()
     check_empty_loader()
     check_gradient_clipping()
+    check_training_visualizations()
     check_validation_epoch()
     check_validation_visualizations()
     check_memory_comparison_png()

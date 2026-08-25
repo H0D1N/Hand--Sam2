@@ -32,6 +32,14 @@ def _overlay(img, left=None, right=None, alpha=0.5):
     return result
 
 
+def _gt_boundary(gt_mask, image):
+    """提取 GT 轮廓；低分辨率原图使用更细的轮廓。"""
+
+    gt = gt_mask.detach().to(image.device).float().squeeze().gt(0.5).float()[None, None]
+    radius = min(2, max(1, round(min(image.shape[-2:]) / 400)))
+    return (F.max_pool2d(gt, 2 * radius + 1, stride=1, padding=radius) + F.max_pool2d(-gt, 2 * radius + 1, stride=1, padding=radius)).squeeze().gt(0)
+
+
 def make_dual_hand_visualization(
     img, lp, rp, lg, rg,
     separate=False, normalized=False, height=None,
@@ -107,7 +115,8 @@ def _label_font(panel_width):
 
 
 def _labeled_panel(panel, lines):
-    panel = _to_pil(panel)
+    if isinstance(panel, torch.Tensor):
+        panel = _to_pil(panel)
     font = _label_font(panel.width)
     probe = ImageDraw.Draw(panel)
     boxes = [probe.textbbox((0, 0), line, font=font) for line in lines]
@@ -189,28 +198,71 @@ def save_dual_hand_four_panel_visualization(
 def save_dual_hand_memory_comparison_visualization(
     original_image, left_gt_mask, right_gt_mask,
     left_no_memory_mask, right_no_memory_mask,
-    left_memory_mask, right_memory_mask, title, save_path,
+    left_memory_mask, right_memory_mask,
+    left_no_memory_point, right_no_memory_point, title, save_path,
 ):
-    """保存左右手 No-Memory 与 Memory 的 2x2 定性对照图。"""
+    """保存 Point-prompt No-Memory 与 Memory 的 2x2 定性对照图。"""
 
     image = _display_image(original_image)
     panels = []
-    for label, pred_mask, gt_mask, side in (
-        ("LEFT | NO MEMORY", left_no_memory_mask, left_gt_mask, "left"),
-        ("LEFT | MEMORY", left_memory_mask, left_gt_mask, "left"),
-        ("RIGHT | NO MEMORY", right_no_memory_mask, right_gt_mask, "right"),
-        ("RIGHT | MEMORY", right_memory_mask, right_gt_mask, "right"),
+    for label, pred_mask, gt_mask, side, point in (
+        ("LEFT | NO MEMORY | POINT", left_no_memory_mask, left_gt_mask, "left", left_no_memory_point),
+        ("LEFT | MEMORY", left_memory_mask, left_gt_mask, "left", None),
+        ("RIGHT | NO MEMORY | POINT", right_no_memory_mask, right_gt_mask, "right", right_no_memory_point),
+        ("RIGHT | MEMORY", right_memory_mask, right_gt_mask, "right", None),
     ):
         panel = _overlay(image, left=pred_mask) if side == "left" else _overlay(image, right=pred_mask)
-        gt = gt_mask.detach().to(image.device).float().squeeze().gt(0.5).float()[None, None]
-        boundary = (F.max_pool2d(gt, 5, stride=1, padding=2) + F.max_pool2d(-gt, 5, stride=1, padding=2)).squeeze().gt(0)
-        panel = torch.where(boundary, panel.new_tensor((1.0, 1.0, 0.0)).view(3, 1, 1), panel)
+        panel = torch.where(_gt_boundary(gt_mask, image), panel.new_tensor((1.0, 1.0, 0.0)).view(3, 1, 1), panel)
+        panel = _to_pil(panel)
+        if point is not None:
+            x, y = point.detach().cpu().tolist()
+            radius, width = max(3, panel.width // 150), max(2, panel.width // 300)
+            ImageDraw.Draw(panel).ellipse((x - radius, y - radius, x + radius, y + radius), fill="white", outline="black", width=width)
         panels.append(_labeled_panel(panel, [label, title]))
 
     panel_width, panel_height = panels[0].size
     result = Image.new("RGB", (2 * panel_width, 2 * panel_height))
     for panel, position in zip(panels, ((0, 0), (panel_width, 0), (0, panel_height), (panel_width, panel_height))):
         result.paste(panel, position)
+    _save(result, save_path)
+
+
+def save_dual_hand_correction_visualization(
+    normalized_image, left_gt_mask, right_gt_mask, left_pred_mask, right_pred_mask,
+    left_point_input, right_point_input, left_initial_points, right_initial_points,
+    left_iou, right_iou, title, save_path,
+):
+    """保存当前训练帧某一轮纠错后的左右手预测。"""
+
+    image = _display_image(normalized_image, normalized=True)
+    panels = []
+    for side, pred, gt_mask, point_input, initial_points, iou in (
+        ("LEFT", left_pred_mask, left_gt_mask, left_point_input, left_initial_points, left_iou),
+        ("RIGHT", right_pred_mask, right_gt_mask, right_point_input, right_initial_points, right_iou),
+    ):
+        panel = _overlay(image, left=pred) if side == "LEFT" else _overlay(image, right=pred)
+        panel = torch.where(_gt_boundary(gt_mask, image), panel.new_tensor((1.0, 1.0, 0.0)).view(3, 1, 1), panel)
+        panel = _to_pil(panel)
+
+        if point_input is not None:
+            coords = point_input["point_coords"].detach().reshape(-1, 2).cpu().tolist()
+            labels = point_input["point_labels"].detach().reshape(-1).cpu().tolist()
+            radius, width = max(3, panel.width // 150), max(2, panel.width // 300)
+            draw = ImageDraw.Draw(panel)
+            point_start = 0
+            if initial_points >= 2 and labels[:2] == [2, 3]:
+                draw.rectangle((*coords[0], *coords[1]), outline="white", width=width)
+                point_start = 2
+            for index in range(point_start, len(coords)):
+                x, y = coords[index]
+                color = "white" if index < initial_points else "lime" if labels[index] == 1 else "magenta"
+                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color, outline="black", width=width)
+
+        panels.append(_labeled_panel(panel, [f"{side} | IoU {iou:.3f}", title]))
+
+    result = Image.new("RGB", (panels[0].width + panels[1].width, max(panel.height for panel in panels)))
+    result.paste(panels[0], (0, 0))
+    result.paste(panels[1], (panels[0].width, 0))
     _save(result, save_path)
 
 
