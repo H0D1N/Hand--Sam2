@@ -1,4 +1,4 @@
-"""把一个 dataset 的可视化 PNG 按 sequence、frame、step 合成 MP4。"""
+"""把各 dataset 的可视化 PNG 按目录、sequence、frame、step 合成 MP4。"""
 
 import argparse
 import re
@@ -17,12 +17,22 @@ def parse_frame_path(path: Path) -> tuple[int, int, int]:
     return tuple(int(value) for value in match.groups())
 
 
+def find_frame_paths(input_dir: Path) -> list[Path]:
+    """递归查找图片，并保证每个子目录中的帧连续且有序。"""
+
+    image_paths = input_dir.rglob("sequence_*_frame_*_step_*.png")
+    return sorted(
+        image_paths,
+        key=lambda path: (path.relative_to(input_dir).parent.parts, parse_frame_path(path)),
+    )
+
+
 def make_video(input_dir: Path, output: Path, fps: float = 2.0, sequence_gap_seconds: float = 2.0) -> None:
-    """连续播放所有帧，并在相邻 sequences 之间插入黑屏。"""
+    """连续播放所有帧，并在切换目录或 sequence 时插入黑屏。"""
 
     import cv2
 
-    image_paths = sorted(input_dir.glob("sequence_*_frame_*_step_*.png"), key=parse_frame_path)
+    image_paths = find_frame_paths(input_dir)
     if not image_paths:
         raise ValueError(f"没有找到可视化 PNG: {input_dir}")
 
@@ -42,7 +52,8 @@ def make_video(input_dir: Path, output: Path, fps: float = 2.0, sequence_gap_sec
     try:
         for image_path in image_paths:
             sequence_idx, _, _ = parse_frame_path(image_path)
-            if previous_sequence is not None and sequence_idx != previous_sequence:
+            sequence = (image_path.relative_to(input_dir).parent, sequence_idx)
+            if previous_sequence is not None and sequence != previous_sequence:
                 for _ in range(gap_frames):
                     writer.write(blank)
 
@@ -52,13 +63,13 @@ def make_video(input_dir: Path, output: Path, fps: float = 2.0, sequence_gap_sec
             if image.shape[:2] != (height, width):
                 image = cv2.resize(image, (width, height))
             writer.write(image)
-            previous_sequence = sequence_idx
+            previous_sequence = sequence
     finally:
         writer.release()
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Combine visualization PNGs into one video.")
+    parser = argparse.ArgumentParser(description="Recursively combine visualization PNGs into one video.")
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fps", type=float, default=2.0)
