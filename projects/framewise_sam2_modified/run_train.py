@@ -16,11 +16,14 @@ from .trainer import log_tensorboard_probe, run_training_epoch, run_validation_e
 from .utils import configure_runtime, dump_json, save_checkpoint, save_training_curves, set_seed
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SAM_CHECKPOINT = REPO_ROOT / "checkpoints/sam2.1_hiera_tiny.pt"
+DEFAULT_DATASET_ROOT = REPO_ROOT / "framewise_data/dataset"
+DEFAULT_DATASET_NAMES = "xingyi_4-5090_oak150-100output", "wuwen_4-5090_release-0623-compressed", "tencent_4-5090_7.5"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train SAM2Modified for framewise dual-hand segmentation.")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--sam-checkpoint", type=Path, default=(REPO_ROOT/ "checkpoints"/ "sam2.1_hiera_tiny.pt"))
+    parser.add_argument("--sam-checkpoint", type=Path, default=DEFAULT_SAM_CHECKPOINT)
     parser.add_argument("--use-predict-mask", action="store_true")
     parser.add_argument("--checkpoint_dir", type=str, default="")
     parser.add_argument("--epochs", type=int, default=10)
@@ -28,9 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-batch-size", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--image-size", type=int, default=768)
-    parser.add_argument("--dataset-percent", type=int, default=10, choices=[10, 20, 50, 100])
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", type=str, default="cuda:1" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--disable-tf32", action="store_true")
     parser.add_argument("--channels-last", action="store_true")
@@ -41,24 +43,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-point-prompt", action="store_true")
     
     # Dataset
-    dataset_group = parser.add_mutually_exclusive_group(required=True)
-    dataset_group.add_argument(
-        "--multiserver", dest="dataset_mode", action="store_const",
-        const="multiserver", help="只使用 MultiServer",
-    )
-    dataset_group.add_argument(
-        "--dexycb", dest="dataset_mode", action="store_const",
-        const="dexycb", help="只使用 DexYCB",
-    )
-    dataset_group.add_argument(
-        "--mixed", dest="dataset_mode", action="store_const",
-        const="mixed", help="同时使用 MultiServer 和 DexYCB",
-    )
-
-    parser.add_argument("--dataset-root", type=Path)
-    parser.add_argument("--dataset-names", nargs="+", default=None)
-    parser.add_argument("--frames-per-second", type=float, default=2.0)
-    parser.add_argument("--test-seq-count", type=int, default=2)
+    parser.add_argument("--dataset", dest="dataset_mode", choices=("multiserver", "dexycb", "mixed"), default="mixed")
+    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
+    parser.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
+    parser.add_argument("--frames-per-second", type=float, default=3.0)
+    parser.add_argument("--test-seq-count", type=int, default=3)
     parser.add_argument("--dex-ycb-root", type=Path)
 
     # Loss Weights
@@ -102,14 +91,8 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--tensorboard-log-interval must be >= 1")
     if args.tensorboard_probe_image_size < 1:
         raise ValueError("--tensorboard-probe-image-size must be >= 1")
-    if args.dataset_mode in {"multiserver", "mixed"} and args.dataset_root is None:
-        parser.error("--multiserver/--mixed 需要提供 --dataset-root")
     if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
-        parser.error("--dexycb/--mixed 需要提供 --dex-ycb-root")
-    if args.dataset_mode in {"multiserver", "mixed"} and args.dataset_root is None:
-        parser.error("--multiserver/--mixed 需要提供 --dataset-root")
-    if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
-        parser.error("--dexycb/--mixed 需要提供 --dex-ycb-root")
+        parser.error("--dataset dexycb/mixed 需要提供 --dex-ycb-root")
     return args
 
 def build_optimizer(args: argparse.Namespace, model: torch.nn.Module) -> torch.optim.Optimizer:
