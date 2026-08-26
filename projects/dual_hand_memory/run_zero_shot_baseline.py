@@ -18,6 +18,7 @@ from projects.framewise_sam2_modified.utils import (
 
 def main() -> None:
     args = parse_args()
+    args.skip_visualizations = True
     if args.framewise_checkpoint is not None:
         raise ValueError(
             "Zero-shot baseline only supports --sam-checkpoint; "
@@ -62,6 +63,7 @@ def main() -> None:
         class_loss_weight=args.class_loss_weight,
     ).to(device)
 
+    # 第 0 帧使用 GT 条件，只从第 1 帧开始统计 tracking 指标。
     validation_metrics = run_validation_epoch(
         model=model,
         loss_fn=loss_fn,
@@ -69,6 +71,7 @@ def main() -> None:
         device=device,
         args=args,
         epoch=0,
+        metric_start_frame=1,
     )
     overall = validation_metrics["overall"]
     epoch_metrics = {
@@ -81,6 +84,7 @@ def main() -> None:
     dump_json(
         {
             "best_val_iou": float(overall["iou"]),
+            "model_parameters": sum(parameter.numel() for parameter in model.parameters()),
             "epochs": [epoch_metrics],
         },
         args.output_dir / "metrics.json",

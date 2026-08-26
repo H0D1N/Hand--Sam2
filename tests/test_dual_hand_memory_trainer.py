@@ -236,6 +236,21 @@ def check_validation_epoch():
     assert all(torch.isfinite(torch.tensor(value)).item() for group_metrics in metrics.values() for value in group_metrics.values())
 
 
+def check_validation_metric_start_frame():
+    batch = build_batch()
+    batch["left_mask"][:, 1].zero_()
+    batch["right_mask"][:, 1].zero_()
+    batch["original_left_mask"][0][1].zero_()
+    batch["original_right_mask"][0][1].zero_()
+
+    metrics = run_validation_epoch(
+        model=ToySequenceModel(), loss_fn=build_loss_fn(), loader=[batch],
+        device=torch.device("cpu"), args=build_args(), epoch=0, metric_start_frame=1,
+    )
+
+    assert metrics["overall"]["object_accuracy"] == 1.0
+
+
 def check_validation_visualizations():
     calls = []
 
@@ -256,6 +271,7 @@ def check_validation_visualizations():
             args=args,
             epoch=1,
             visualization_fn=record_visualization,
+            metric_start_frame=1,
         )
 
         expected_dir = Path(output_dir) / "visualizations" / "val_epoch_2"
@@ -327,6 +343,7 @@ def main():
     check_gradient_clipping()
     check_training_visualizations()
     check_validation_epoch()
+    check_validation_metric_start_frame()
     check_validation_visualizations()
     check_memory_comparison_png()
     check_empty_validation_loader()

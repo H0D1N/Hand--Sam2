@@ -319,7 +319,9 @@ def run_validation_epoch(
     args: argparse.Namespace,
     epoch: int,
     visualization_fn=save_dual_hand_memory_comparison_visualization,
+    metric_start_frame: int = 0,
 ) -> dict[str, dict[str, float | None]]:
+    """验证完整序列；metric_start_frame 只控制 IoU、Dice 和 Object 指标的起始帧。"""
     model.eval()
 
     stats = {
@@ -367,32 +369,17 @@ def run_validation_epoch(
         # [B T C H W]
         # 遍历 T, 某一帧的所有 2B 个预测
         for frame_idx, outputs in enumerate(frame_outputs):
+            count_metrics = frame_idx >= metric_start_frame
 
-            # left_masks[:, frame_idx]  [B,1,H,W]
-            # right_masks[:, frame_idx] [B,1,H,W]
-            # 拼接后                     [2B,1,H,W]
-            # gt_present                 [2B] 前 B 个表示左手是否存在，后 B 个表示右手是否存在
-            gt_present = object_targets_from_masks(torch.cat((
-                left_masks[:, frame_idx], 
-                right_masks[:, frame_idx],
-            )))
-
-            # [2B] 
-            pred_present = torch.cat((
-                outputs["left"]["multistep_object_score_logits"][-1],
-                outputs["right"]["multistep_object_score_logits"][-1],
-            )).reshape(-1) > 0
+            if count_metrics:
+                # 前 B 个表示左手，后 B 个表示右手。
+                gt_present = object_targets_from_masks(torch.cat((left_masks[:, frame_idx], right_masks[:, frame_idx])))
+                pred_present = torch.cat((
+                    outputs["left"]["multistep_object_score_logits"][-1],
+                    outputs["right"]["multistep_object_score_logits"][-1],
+                )).reshape(-1) > 0
 
             for sample_idx in range(batch_size):
-                current_stats = (stats["overall"], stats[dataset_groups[sample_idx]])
-                sample_gt_present = gt_present[[sample_idx, batch_size + sample_idx]]
-                sample_pred_present = pred_present[[sample_idx, batch_size + sample_idx]]
-                for values in current_stats:
-                    values["object_tp"] += (sample_pred_present & sample_gt_present).sum().item()
-                    values["object_tn"] += (~sample_pred_present & ~sample_gt_present).sum().item()
-                    values["object_fp"] += (sample_pred_present & ~sample_gt_present).sum().item()
-                    values["object_fn"] += (~sample_pred_present & sample_gt_present).sum().item()
-
                 original_left_mask = batch["original_left_mask"][sample_idx][frame_idx].unsqueeze(0).to(device)
                 original_right_mask = batch["original_right_mask"][sample_idx][frame_idx].unsqueeze(0).to(device)
                 original_size = original_right_mask.shape[-2:]
@@ -400,23 +387,32 @@ def run_validation_epoch(
                 left_logits = upsample_logits(outputs["left"]["pred_masks_high_res"][sample_idx:sample_idx + 1], size=original_size)
                 right_logits = upsample_logits(outputs["right"]["pred_masks_high_res"][sample_idx:sample_idx + 1], size=original_size)
 
-                left_iou = iou_target_from_logits(left_logits, original_left_mask)
-                right_iou = iou_target_from_logits(right_logits, original_right_mask)
-
-                left_dice = 2.0 * left_iou / (1.0 + left_iou)
-                right_dice = 2.0 * right_iou / (1.0 + right_iou)
-
-                if original_left_mask.any().item():
+                if count_metrics:
+                    current_stats = (stats["overall"], stats[dataset_groups[sample_idx]])
+                    sample_gt_present = gt_present[[sample_idx, batch_size + sample_idx]]
+                    sample_pred_present = pred_present[[sample_idx, batch_size + sample_idx]]
                     for values in current_stats:
-                        values["iou_sum"] += left_iou.item()
-                        values["dice_sum"] += left_dice.item()
-                        values["foreground_hands"] += 1
+                        values["object_tp"] += (sample_pred_present & sample_gt_present).sum().item()
+                        values["object_tn"] += (~sample_pred_present & ~sample_gt_present).sum().item()
+                        values["object_fp"] += (sample_pred_present & ~sample_gt_present).sum().item()
+                        values["object_fn"] += (~sample_pred_present & sample_gt_present).sum().item()
 
-                if original_right_mask.any().item():
-                    for values in current_stats:
-                        values["iou_sum"] += right_iou.item()
-                        values["dice_sum"] += right_dice.item()
-                        values["foreground_hands"] += 1
+                    left_iou = iou_target_from_logits(left_logits, original_left_mask)
+                    right_iou = iou_target_from_logits(right_logits, original_right_mask)
+                    left_dice = 2.0 * left_iou / (1.0 + left_iou)
+                    right_dice = 2.0 * right_iou / (1.0 + right_iou)
+
+                    if original_left_mask.any().item():
+                        for values in current_stats:
+                            values["iou_sum"] += left_iou.item()
+                            values["dice_sum"] += left_dice.item()
+                            values["foreground_hands"] += 1
+
+                    if original_right_mask.any().item():
+                        for values in current_stats:
+                            values["iou_sum"] += right_iou.item()
+                            values["dice_sum"] += right_dice.item()
+                            values["foreground_hands"] += 1
 
                 dataset_name = batch["dataset_name"][sample_idx]
                 if frame_idx == 0:
