@@ -8,10 +8,10 @@ from .dataset import build_dataloaders, build_center_point_prompt
 from .run_train import configure_model, parse_args
 from .trainer import run_validation_epoch
 from .utils import configure_runtime, dump_json, set_seed
-from .visualization import save_dual_hand_five_panel_visualization
 
 def main() -> None:
     args = parse_args()
+    args.skip_visualizations = True
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -35,32 +35,27 @@ def main() -> None:
     if args.channels_last and device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
 
-    metrics = run_validation_epoch(
+    point_prompt_fn = build_center_point_prompt if args.use_point_prompt else None
+    validation_metrics = run_validation_epoch(
         model=model,
         loader=val_loader,
         device=device,
         epoch=0,
         args=args,
-        visualization_fn=save_dual_hand_five_panel_visualization,
-        point_prompt_fn=build_center_point_prompt,
+        point_prompt_fn=point_prompt_fn,
     )
+    overall = validation_metrics["overall"]
     epoch_metrics = {
         "epoch": 0.0,
-        "lr": float("nan"),
-        "train_loss": float("nan"),
-        "val_loss": float(metrics["loss"]),
-        "val_iou": float(metrics["iou"]),
-        "val_dice": float(metrics["dice"]),
-        "val_object_accuracy": float(metrics["object_accuracy"]),
-        "val_object_precision": float(metrics["object_precision"]),
-        "val_object_recall": float(metrics["object_recall"]),
-        "val_object_f1": float(metrics["object_f1"]),
+        "lr": None,
+        "train_loss": None,
+        "validation": validation_metrics,
     }
 
     dump_json(
         {
-            "best_val_iou": epoch_metrics["val_iou"],
-            "early_stopped": False,
+            "best_val_iou": float(overall["iou"]),
+            "model_parameters": sum(parameter.numel() for parameter in model.parameters()),
             "epochs": [epoch_metrics],
         },
         args.output_dir / "metrics.json",
@@ -71,13 +66,13 @@ def main() -> None:
         "val_loss=%.4f | val_iou=%.4f | val_dice=%.4f | "
         "obj_acc=%.4f | obj_precision=%.4f | "
         "obj_recall=%.4f | obj_f1=%.4f",
-        epoch_metrics["val_loss"],
-        epoch_metrics["val_iou"],
-        epoch_metrics["val_dice"],
-        epoch_metrics["val_object_accuracy"],
-        epoch_metrics["val_object_precision"],
-        epoch_metrics["val_object_recall"],
-        epoch_metrics["val_object_f1"],
+        overall["loss"],
+        overall["iou"],
+        overall["dice"],
+        overall["object_accuracy"],
+        overall["object_precision"],
+        overall["object_recall"],
+        overall["object_f1"],
     )
 
 

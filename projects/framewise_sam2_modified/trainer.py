@@ -220,19 +220,16 @@ def run_validation_epoch(
         args: argparse.Namespace,
         visualization_fn=save_dual_hand_visualization,
         point_prompt_fn=None,
-) -> dict[str, float]:
+) -> dict[str, dict[str, float | None]]:
     model.eval()
 
-    total_loss = 0.0
-    total_iou = 0.0
-    total_dice = 0.0
-    total_samples = 0
-    total_foreground_hands = 0
-
-    object_tp = 0
-    object_tn = 0
-    object_fp = 0
-    object_fn = 0
+    stats = {
+        name: {
+            "loss_sum": 0.0, "samples": 0, "iou_sum": 0.0, "dice_sum": 0.0,
+            "foreground_hands": 0, "object_tp": 0, "object_tn": 0, "object_fp": 0, "object_fn": 0,
+        }
+        for name in ("overall", "multiserver", "dexycb")
+    }
 
     vis_dir = (
         Path(args.output_dir)
@@ -284,8 +281,29 @@ def run_validation_epoch(
         )
 
         batch_size = images.size(0)
-        total_loss += loss.item() * batch_size
-        total_samples += batch_size
+        dataset_groups = ["dexycb" if name.lower() == "dexycb" else "multiserver" for name in batch["dataset_name"]]
+        stats["overall"]["loss_sum"] += loss.item() * batch_size
+        stats["overall"]["samples"] += batch_size
+
+        for dataset_group in ("multiserver", "dexycb"):
+            sample_indices = [index for index, group in enumerate(dataset_groups) if group == dataset_group]
+            if not sample_indices:
+                continue
+            if len(sample_indices) == batch_size:
+                group_loss = loss
+            else:
+                group_outputs = {
+                    hand: {name: value[sample_indices] for name, value in outputs[hand].items()}
+                    for hand in ("left", "right")
+                }
+                group_loss = dual_hand_loss(
+                    model_output=group_outputs,
+                    left_masks=left_masks[sample_indices], right_masks=right_masks[sample_indices],
+                    bce_weight=args.bce_weight, dice_weight=args.dice_weight,
+                    iou_weight=args.iou_weight, object_score_weight=args.object_score_weight,
+                )[0]
+            stats[dataset_group]["loss_sum"] += group_loss.item() * len(sample_indices)
+            stats[dataset_group]["samples"] += len(sample_indices)
 
         gt_present = torch.cat((
             object_targets_from_masks(left_masks),
@@ -296,13 +314,16 @@ def run_validation_epoch(
             outputs["right"]["object_score_logits"].reshape(-1) > 0,
         ))
 
-        object_tp += (pred_present & gt_present).sum().item()
-        object_tn += (~pred_present & ~gt_present).sum().item()
-        object_fp += (pred_present & ~gt_present).sum().item()
-        object_fn += (~pred_present & gt_present).sum().item()
-
-        # 可视化与可视化准备；具体计算左右手的iou& dice
         for sample_index in range(batch_size):
+            current_stats = (stats["overall"], stats[dataset_groups[sample_index]])
+            sample_gt_present = gt_present[[sample_index, batch_size + sample_index]]
+            sample_pred_present = pred_present[[sample_index, batch_size + sample_index]]
+            for values in current_stats:
+                values["object_tp"] += (sample_pred_present & sample_gt_present).sum().item()
+                values["object_tn"] += (~sample_pred_present & ~sample_gt_present).sum().item()
+                values["object_fp"] += (sample_pred_present & ~sample_gt_present).sum().item()
+                values["object_fn"] += (~sample_pred_present & sample_gt_present).sum().item()
+
             original_left_mask = batch["original_left_mask"][sample_index].unsqueeze(0).to(device)
             original_right_mask = batch["original_right_mask"][sample_index].unsqueeze(0).to(device)
             original_size = original_left_mask.shape[-2:]
@@ -319,14 +340,16 @@ def run_validation_epoch(
             right_dice = 2.0 * right_iou / (1.0 + right_iou)
 
             if original_left_mask.any().item():
-                total_iou += left_iou.item()
-                total_dice += left_dice.item()
-                total_foreground_hands += 1
+                for values in current_stats:
+                    values["iou_sum"] += left_iou.item()
+                    values["dice_sum"] += left_dice.item()
+                    values["foreground_hands"] += 1
 
             if original_right_mask.any().item():
-                total_iou += right_iou.item()
-                total_dice += right_dice.item()
-                total_foreground_hands += 1
+                for values in current_stats:
+                    values["iou_sum"] += right_iou.item()
+                    values["dice_sum"] += right_dice.item()
+                    values["foreground_hands"] += 1
 
             dataset_name = batch["dataset_name"][sample_index]
             num_vis_saved = num_vis_saved_by_dataset.get(dataset_name, 0)
@@ -346,32 +369,37 @@ def run_validation_epoch(
                 num_vis_saved_by_dataset[dataset_name] = num_vis_saved + 1
 
         if step % max(args.log_interval, 1) == 0 or step == len(loader):
+            overall = stats["overall"]
             logging.info(
                 "Val Epoch %d | step %d/%d | "
                 "loss=%.4f | iou=%.4f | dice=%.4f",
                 epoch + 1,
                 step,
                 len(loader),
-                total_loss / total_samples,
-                total_iou / total_foreground_hands,
-                total_dice / total_foreground_hands,
+                overall["loss_sum"] / overall["samples"],
+                overall["iou_sum"] / max(overall["foreground_hands"], 1),
+                overall["dice_sum"] / max(overall["foreground_hands"], 1),
             )
 
-    object_total = object_tp + object_tn + object_fp + object_fn
-    object_accuracy = (object_tp + object_tn) / max(object_total, 1)
-    object_precision = object_tp / max(object_tp + object_fp, 1)
-    object_recall = object_tp / max(object_tp + object_fn, 1)
-    object_f1 = (
-        2.0 * object_precision * object_recall
-        / max(object_precision + object_recall, 1e-8)
-    )
+    if stats["overall"]["samples"] == 0:
+        raise ValueError("验证 DataLoader 中没有样本")
 
-    return {
-        "loss": total_loss / total_samples,
-        "iou": total_iou / total_foreground_hands,
-        "dice": total_dice / total_foreground_hands,
-        "object_accuracy": object_accuracy,
-        "object_precision": object_precision,
-        "object_recall": object_recall,
-        "object_f1": object_f1,
-    }
+    result = {}
+    metric_names = ("loss", "iou", "dice", "object_accuracy", "object_precision", "object_recall", "object_f1")
+    for name, values in stats.items():
+        if values["samples"] == 0:
+            result[name] = {metric: None for metric in metric_names}
+            continue
+        object_total = sum(values[key] for key in ("object_tp", "object_tn", "object_fp", "object_fn"))
+        object_precision = values["object_tp"] / max(values["object_tp"] + values["object_fp"], 1)
+        object_recall = values["object_tp"] / max(values["object_tp"] + values["object_fn"], 1)
+        result[name] = {
+            "loss": values["loss_sum"] / values["samples"],
+            "iou": values["iou_sum"] / max(values["foreground_hands"], 1),
+            "dice": values["dice_sum"] / max(values["foreground_hands"], 1),
+            "object_accuracy": (values["object_tp"] + values["object_tn"]) / max(object_total, 1),
+            "object_precision": object_precision,
+            "object_recall": object_recall,
+            "object_f1": 2 * object_precision * object_recall / max(object_precision + object_recall, 1e-8),
+        }
+    return result

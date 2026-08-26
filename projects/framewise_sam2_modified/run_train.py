@@ -255,7 +255,7 @@ def main() -> None:
         )
 
     best_val_iou = float("-inf")
-    history: list[dict[str, float]] = []
+    history: list[dict] = []
     checkpoints_dir = args.output_dir / "checkpoints"
 
     epochs_without_improvement = 0
@@ -292,15 +292,14 @@ def main() -> None:
         should_validate = ((epoch + 1) % max(args.val_interval, 1) == 0 or epoch == args.epochs - 1)
         if should_validate:
             val_metrics = run_validation_epoch(model=model, loader=val_loader, device=device, epoch=epoch, args=args, point_prompt_fn=point_prompt_fn,)
-            scheduler.step(val_metrics["loss"])
+            overall_val = val_metrics["overall"]
+            scheduler.step(overall_val["loss"])
 
             if tensorboard_writer is not None:
-                for metric_name, metric_value in val_metrics.items():
-                    tensorboard_writer.add_scalar(
-                        f"validation/{metric_name}",
-                        metric_value,
-                        epoch_end_step,
-                    )
+                for group, group_metrics in val_metrics.items():
+                    for metric_name, metric_value in group_metrics.items():
+                        if metric_value is not None:
+                            tensorboard_writer.add_scalar(f"validation/{group}/{metric_name}", metric_value, epoch_end_step)
                 tensorboard_writer.flush()
 
             if device.type == "cuda":
@@ -312,24 +311,18 @@ def main() -> None:
                 "obj_acc=%.4f | obj_precision=%.4f | "
                 "obj_recall=%.4f | obj_f1=%.4f",
                 epoch + 1,
-                val_metrics["loss"],
-                val_metrics["iou"],
-                val_metrics["dice"],
-                val_metrics["object_accuracy"],
-                val_metrics["object_precision"],
-                val_metrics["object_recall"],
-                val_metrics["object_f1"],
+                overall_val["loss"],
+                overall_val["iou"],
+                overall_val["dice"],
+                overall_val["object_accuracy"],
+                overall_val["object_precision"],
+                overall_val["object_recall"],
+                overall_val["object_f1"],
             )
         else:
-            val_metrics = {
-                "loss": float("nan"),
-                "iou": float("nan"),
-                "dice": float("nan"),
-                "object_accuracy": float("nan"),
-                "object_precision": float("nan"),
-                "object_recall": float("nan"),
-                "object_f1": float("nan"),
-            }
+            empty_metrics = {name: float("nan") for name in ("loss", "iou", "dice", "object_accuracy", "object_precision", "object_recall", "object_f1")}
+            val_metrics = {group: dict(empty_metrics) for group in ("overall", "multiserver", "dexycb")}
+            overall_val = val_metrics["overall"]
 
         current_lr = float(optimizer.param_groups[0]["lr"])
 
@@ -337,25 +330,19 @@ def main() -> None:
             "epoch": float(epoch + 1),
             "lr": current_lr,
             "train_loss": float(train_metrics["loss"]),
-            "val_loss": float(val_metrics["loss"]),
-            "val_iou": float(val_metrics["iou"]),
-            "val_dice": float(val_metrics["dice"]),
-            "val_object_accuracy": float(val_metrics["object_accuracy"]),
-            "val_object_precision": float(val_metrics["object_precision"]),
-            "val_object_recall": float(val_metrics["object_recall"]),
-            "val_object_f1": float(val_metrics["object_f1"]),
+            "validation": val_metrics,
         }
 
         history.append(epoch_metrics)
 
         improved = (
-            math.isfinite(val_metrics["iou"])
-            and val_metrics["iou"]
+            math.isfinite(overall_val["iou"])
+            and overall_val["iou"]
             > best_val_iou + args.early_stop_min_delta
         )
 
         if improved:
-            best_val_iou = float(val_metrics["iou"])
+            best_val_iou = float(overall_val["iou"])
             epochs_without_improvement = 0
         elif should_validate:
             epochs_without_improvement += 1
@@ -406,7 +393,12 @@ def main() -> None:
 
         if not args.skip_visualizations:
             save_training_curves(
-                history=history,
+                history=[{
+                    "epoch": row["epoch"], "train_loss": row["train_loss"],
+                    "val_loss": row["validation"]["overall"]["loss"],
+                    "val_iou": row["validation"]["overall"]["iou"],
+                    "val_dice": row["validation"]["overall"]["dice"],
+                } for row in history],
                 output_path=(
                     args.output_dir
                     / "visualizations"
