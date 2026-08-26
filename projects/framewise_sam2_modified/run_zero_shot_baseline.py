@@ -4,14 +4,31 @@ import logging
 
 import torch
 
-from .dataset import build_dataloaders, build_center_point_prompt
-from .run_train import configure_model, parse_args
+from .builder import build_sam2_modified_tiny
+from .dataset import build_center_point_prompt
 from .trainer import run_validation_epoch
 from .utils import configure_runtime, dump_json, set_seed
+from projects.dual_hand_memory.dataset import collate_clip_batch
+from projects.zero_shot_common import build_zero_shot_loader, parse_args
+
+
+def collate_tracking_frames(items):
+    """丢掉条件帧，并把 [B,T-1,...] 展平成 Framewise 的 [B*(T-1),...]。"""
+    batch = collate_clip_batch(items)
+    tracking_frames = batch["image"].size(1) - 1
+    return {
+        "image": batch["image"][:, 1:].flatten(0, 1),
+        "left_mask": batch["left_mask"][:, 1:].flatten(0, 1),
+        "right_mask": batch["right_mask"][:, 1:].flatten(0, 1),
+        "original_image": [value for sequence in batch["original_image"] for value in sequence[1:]],
+        "original_left_mask": [value for sequence in batch["original_left_mask"] for value in sequence[1:]],
+        "original_right_mask": [value for sequence in batch["original_right_mask"] for value in sequence[1:]],
+        "sample_id": [value for sequence in batch["sample_id"] for value in sequence[1:]],
+        "dataset_name": [name for name in batch["dataset_name"] for _ in range(tracking_frames)],
+    }
 
 def main() -> None:
     args = parse_args()
-    args.skip_visualizations = True
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -26,11 +43,13 @@ def main() -> None:
         channels_last=args.channels_last,
     )
 
-    _, val_loader, _ = build_dataloaders(args, device)
+    val_loader = build_zero_shot_loader(args, device, collate_fn=collate_tracking_frames)
 
-    # 只加载官方 SAM2 checkpoint，并按训练配置创建双 Decoder 和 Adapter。
-    # 不加载任何双手训练 checkpoint，也不创建 optimizer。
-    model = configure_model(args)
+    # 官方 SAM2 权重复制为左右 Decoder；zero-shot 不注入未训练的 Adapter。
+    model = build_sam2_modified_tiny(
+        checkpoint_path=args.sam_checkpoint, device=args.device,
+        mode="eval", image_size=args.image_size,
+    )
 
     if args.channels_last and device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)

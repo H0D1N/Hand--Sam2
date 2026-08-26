@@ -5,25 +5,14 @@ import logging
 import torch
 
 from .builder import build_sam2_dual_hand_memory_tiny
-from .dataset import build_dataloaders
 from .losses import DualHandMemoryLoss
-from .run_train import parse_args
 from .trainer import run_validation_epoch
-from projects.framewise_sam2_modified.utils import (
-    configure_runtime,
-    dump_json,
-    set_seed,
-)
+from projects.framewise_sam2_modified.utils import configure_runtime, dump_json, set_seed
+from projects.zero_shot_common import build_zero_shot_loader, parse_args
 
 
 def main() -> None:
     args = parse_args()
-    args.skip_visualizations = True
-    if args.framewise_checkpoint is not None:
-        raise ValueError(
-            "Zero-shot baseline only supports --sam-checkpoint; "
-            "--framewise-checkpoint contains trained dual-hand weights."
-        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -43,19 +32,10 @@ def main() -> None:
         device=device,
         mode="eval",
         image_size=args.image_size,
-        use_image_adapter=args.use_image_adapter,
-        use_decoder_adapter=args.use_decoder_adapter,
-        adapter_dim=args.adapter_dim,
-        adapter_dropout=args.adapter_dropout,
-        adapter_init_scale=args.adapter_init_scale,
-        num_init_cond_frames_for_train=args.num_init_cond_frames_for_train,
-        num_frames_to_correct_for_train=args.num_frames_to_correct_for_train,
-        add_all_frames_to_correct_as_cond=args.add_all_frames_to_correct_as_cond,
-        num_correction_pt_per_frame=args.num_correction_pt_per_frame,
     )
     args.image_size = model.image_size
 
-    _, val_loader = build_dataloaders(args, device)
+    val_loader = build_zero_shot_loader(args, device)
     loss_fn = DualHandMemoryLoss(
         mask_loss_weight=args.mask_loss_weight,
         dice_loss_weight=args.dice_loss_weight,
