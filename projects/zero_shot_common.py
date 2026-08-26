@@ -17,8 +17,8 @@ DEFAULT_DATASET_NAMES = "xingyi_4-5090_oak150-100output", "wuwen_4-5090_release-
 
 
 def parse_args() -> argparse.Namespace:
-    """解析两种模型完全相同的 zero-shot 数据与运行参数。"""
-    parser = argparse.ArgumentParser(description="Compare Framewise and Memory zero-shot baselines on shared clips.")
+    """解析两种模型共用的验证数据与运行参数。"""
+    parser = argparse.ArgumentParser(description="Evaluate Framewise or Memory models on shared validation clips.")
 
     # 公共参数
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--log-interval", type=int, default=50)
+    parser.add_argument("--save-visualizations", action="store_true")
 
     # framewise 专有参数
     parser.add_argument("--channels-last", action="store_true")
@@ -53,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         parser.error("--val-clip-stride 不能小于 --clip-length")
 
     # 公共固定参数
-    args.skip_visualizations = True
+    args.skip_visualizations = not args.save_visualizations
 
     # Framewise 固定参数
     args.multimask_output = False

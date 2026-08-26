@@ -25,6 +25,8 @@ class SAM2DualHandMemory(SAM2Modified):
         left_masks,
         right_masks,
         prompt_mode,
+        extra_init_point_frame_indices=None,
+        correction_frame_indices=None,
     ):
         """
         images:      [B, T, 3, H, W]
@@ -58,6 +60,33 @@ class SAM2DualHandMemory(SAM2Modified):
             right_masks=right_masks,
             prompt_mode=prompt_mode,
         )
+
+        # 分析额外初始提示的影响：保留原有条件帧，并把指定后续帧
+        # 改为独立 point 条件帧。默认 None，不影响训练和普通验证。
+        if extra_init_point_frame_indices is not None:
+            extra_frames = list(dict.fromkeys(extra_init_point_frame_indices))
+            for frame_idx in extra_frames:
+                points, labels = get_next_point(
+                    gt_masks=backbone_out["gt_masks_per_frame"][frame_idx],
+                    pred_masks=None,
+                    method=self.pt_sampling_for_eval,
+                )
+                backbone_out["point_inputs_per_frame"][frame_idx] = {
+                    "point_coords": points,
+                    "point_labels": labels,
+                }
+                backbone_out["mask_inputs_per_frame"].pop(frame_idx, None)
+
+            init_cond_frames = list(dict.fromkeys(backbone_out["init_cond_frames"] + extra_frames))
+            backbone_out["init_cond_frames"] = init_cond_frames
+            backbone_out["frames_not_in_init_cond"] = [
+                frame_idx for frame_idx in range(num_frames)
+                if frame_idx not in init_cond_frames
+            ]
+
+        # 分析纠错能力：显式指定需要追加纠错点的帧。
+        if correction_frame_indices is not None:
+            backbone_out["frames_to_add_correction_pt"] = list(dict.fromkeys(correction_frame_indices))
 
         # 3. 使用 Prompt 和左右 Memory 运行序列跟踪
         return self.forward_tracking(backbone_out)
