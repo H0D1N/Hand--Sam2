@@ -184,9 +184,9 @@ def _save_experiment_visualizations(
 
     dataset_name = batch["dataset_name"][sample_index]
     stream_id = batch["stream_id"][sample_index]
-    base_dir = output_dir / "visualizations" / _safe_name(dataset_name) / _safe_name(stream_id)
+    base_dir = output_dir / "visualizations"
+    dataset_path = Path(_safe_name(dataset_name)) / _safe_name(stream_id)
     prompt_number = batch["frame_numbers"][sample_index][prompt_frame]
-    prompt_dir = base_dir / f"frame_{prompt_number}"
     original_size = batch["original_left_mask"][sample_index][prompt_frame].shape[-2:]
     point_scale = images.new_tensor((original_size[1] / images.size(-1), original_size[0] / images.size(-2)))
 
@@ -200,23 +200,25 @@ def _save_experiment_visualizations(
         left_no_memory_mask=single_logits[0] > 0, right_no_memory_mask=single_logits[1] > 0,
         left_memory_mask=memory_logits[0] > 0, right_memory_mask=memory_logits[1] > 0,
         left_no_memory_point=left_point, right_no_memory_point=right_point,
-        title="Memory vs single image", save_path=prompt_dir / "memory_vs_single_image.png",
+        title="Memory vs single image",
+        save_path=base_dir / "memory_vs_single_image" / dataset_path / f"frame_{prompt_number}.png",
     )
 
     prompt_left_gt = left_masks[sample_index, prompt_frame:prompt_frame + 1]
     prompt_right_gt = right_masks[sample_index, prompt_frame:prompt_frame + 1]
     _save_correction_steps(
         prompt_outputs, prompt_frame, images[sample_index, prompt_frame], prompt_left_gt, prompt_right_gt,
-        initial_points=1, title="Prompt reset correction", output_dir=prompt_dir / "prompt_reset_correction",
+        initial_points=1, title="Prompt reset correction",
+        output_dir=base_dir / "prompt_reset_correction" / dataset_path / f"frame_{prompt_number}",
     )
 
     worst_number = batch["frame_numbers"][sample_index][worst_frame]
-    worst_dir = base_dir / f"frame_{worst_number}" / "worst_frame_correction"
     worst_left_gt = left_masks[sample_index, worst_frame:worst_frame + 1]
     worst_right_gt = right_masks[sample_index, worst_frame:worst_frame + 1]
     _save_correction_steps(
         worst_outputs, worst_frame, images[sample_index, worst_frame], worst_left_gt, worst_right_gt,
-        initial_points=0, title="Worst Memory frame correction", output_dir=worst_dir,
+        initial_points=0, title="Worst Memory frame correction",
+        output_dir=base_dir / "worst_frame_correction" / dataset_path / f"frame_{worst_number}",
     )
 
 
