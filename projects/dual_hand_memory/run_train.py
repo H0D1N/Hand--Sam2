@@ -85,7 +85,8 @@ def parse_args() -> argparse.Namespace:
 
     # Clip 与 DataLoader
     parser.add_argument("--clip-length", type=int, default=8)
-    parser.add_argument("--clip-stride", type=int, default=2)
+    parser.add_argument("--clip-stride", type=int, default=80)
+    parser.add_argument("--val-clip-stride", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--val-batch-size", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -123,6 +124,8 @@ def parse_args() -> argparse.Namespace:
 
     if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
         parser.error("--dataset dexycb/mixed 需要提供 --dex-ycb-root")
+    if args.val_clip_stride < args.clip_length:
+        parser.error("--val-clip-stride 不能小于 --clip-length")
     if args.epochs < 1:
         parser.error("--epochs 必须大于 0")
     if args.grad_accum_steps < 1:
