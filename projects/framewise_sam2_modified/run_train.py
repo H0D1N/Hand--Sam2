@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train SAM2Modified for framewise dual-hand segmentation.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--sam-checkpoint", type=Path, default=DEFAULT_SAM_CHECKPOINT)
+    parser.add_argument("--resume-checkpoint", type=Path)
     parser.add_argument("--use-predict-mask", action="store_true")
     parser.add_argument("--checkpoint_dir", type=str, default="")
     parser.add_argument("--epochs", type=int, default=10)
@@ -254,13 +255,48 @@ def main() -> None:
             args.output_dir / "tensorboard",
         )
 
+    start_epoch = 0
     best_val_iou = float("-inf")
     history: list[dict] = []
     checkpoints_dir = args.output_dir / "checkpoints"
 
     epochs_without_improvement = 0
     early_stopped = False
-    for epoch in range(args.epochs):
+
+    # resume_ckpt 功能全部代码，其他部分不变
+    if args.resume_checkpoint is not None:
+        checkpoint = torch.load(
+            args.resume_checkpoint,
+            map_location=device,
+            weights_only=False,
+        )
+        if "optimizer_state" not in checkpoint:
+            raise ValueError("Resume 必须使用包含训练状态的 last.pt")
+
+        model.load_state_dict(checkpoint["model_state"], strict=True)
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        scaler.load_state_dict(checkpoint["scaler_state"])
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_val_iou = float(checkpoint["best_val_iou"])
+        history = list(checkpoint["history"])
+
+        if start_epoch >= args.epochs:
+            raise ValueError(
+                f"Checkpoint 已完成 {start_epoch} 轮，"
+                f"--epochs 必须大于 {start_epoch}"
+            )
+
+        logging.info(
+            "Resume training | checkpoint=%s | next_epoch=%d/%d | lr=%.2e",
+            args.resume_checkpoint,
+            start_epoch + 1,
+            args.epochs,
+            optimizer.param_groups[0]["lr"],
+        )
+
+    for epoch in range(start_epoch, args.epochs):
         logging.info("--- Epoch %d/%d ---",epoch + 1, args.epochs)
 
         # 每轮改变训练样本的排列顺序。
