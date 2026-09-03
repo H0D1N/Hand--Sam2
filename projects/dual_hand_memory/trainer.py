@@ -320,6 +320,7 @@ def run_validation_epoch(
     epoch: int,
     visualization_fn=save_dual_hand_memory_comparison_visualization,
     metric_start_frame: int = 0,
+    correction_frame_indices=None,
 ) -> dict[str, dict[str, float | None]]:
     """验证完整序列；metric_start_frame 只控制 IoU、Dice 和 Object 指标的起始帧。"""
     model.eval()
@@ -349,6 +350,7 @@ def run_validation_epoch(
             left_masks=left_masks,
             right_masks=right_masks,
             prompt_mode=args.prompt_mode,
+            correction_frame_indices=correction_frame_indices,
         )
         loss, _ = loss_fn(frame_outputs, left_masks, right_masks,)
 

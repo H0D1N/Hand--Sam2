@@ -1,14 +1,18 @@
-"""Evaluate the unfinetuned dual-hand Memory model on the validation split."""
+"""Evaluate an initialized or trained dual-hand Memory model."""
 
 import logging
 
 import torch
 
-from .builder import build_sam2_dual_hand_memory_tiny
-from .losses import DualHandMemoryLoss
-from .trainer import run_validation_epoch
+from ...dual_hand_memory.builder import (
+    build_sam2_dual_hand_memory_tiny,
+    load_sam2_dual_hand_memory_tiny,
+)
+from ...dual_hand_memory.losses import DualHandMemoryLoss
+from ...dual_hand_memory.trainer import run_validation_epoch
 from projects.framewise_sam2_modified.utils import configure_runtime, dump_json, set_seed
-from projects.zero_shot_common import build_zero_shot_loader, parse_args
+from projects.hardcases.evaluation_common import build_zero_shot_loader, parse_args
+
 
 
 def main() -> None:
@@ -24,15 +28,20 @@ def main() -> None:
     device = torch.device(args.device)
     configure_runtime(device, use_tf32=not args.disable_tf32)
 
-    # 只加载官方 SAM2 checkpoint，并复制初始化左右手 Decoder 和 Memory。
-    # 不加载任何双手训练 checkpoint，也不创建训练相关组件。
-    model = build_sam2_dual_hand_memory_tiny(
-        sam_checkpoint=args.sam_checkpoint,
-        framewise_checkpoint=None,
-        device=device,
-        mode="eval",
-        image_size=args.image_size,
-    )
+    if args.model_checkpoint is not None:
+        model = load_sam2_dual_hand_memory_tiny(args.model_checkpoint, device=device)
+    else:
+        model = build_sam2_dual_hand_memory_tiny(
+            sam_checkpoint=args.sam_checkpoint,
+            framewise_checkpoint=args.framewise_checkpoint,
+            device=device,
+            mode="eval",
+            image_size=args.image_size,
+        )
+
+    # 评测协议独立于 checkpoint 中保存的训练配置。
+    model.num_correction_pt_per_frame = args.num_correction_pt_per_frame
+    model.add_all_frames_to_correct_as_cond = args.add_all_frames_to_correct_as_cond
     args.image_size = model.image_size
 
     val_loader = build_zero_shot_loader(args, device)
@@ -43,7 +52,6 @@ def main() -> None:
         class_loss_weight=args.class_loss_weight,
     ).to(device)
 
-    # 第 0 帧使用 GT 条件，只从第 1 帧开始统计 tracking 指标。
     validation_metrics = run_validation_epoch(
         model=model,
         loss_fn=loss_fn,
@@ -51,7 +59,8 @@ def main() -> None:
         device=device,
         args=args,
         epoch=0,
-        metric_start_frame=1,
+        metric_start_frame=args.metric_start_frame,
+        correction_frame_indices=args.correction_frame_indices,
     )
     overall = validation_metrics["overall"]
     epoch_metrics = {
@@ -71,7 +80,7 @@ def main() -> None:
     )
 
     logging.info(
-        "ZERO-SHOT MEMORY BASELINE COMPLETE | "
+        "MEMORY EVALUATION COMPLETE | "
         "val_loss=%.4f | val_iou=%.4f | val_dice=%.4f | "
         "obj_acc=%.4f | obj_precision=%.4f | "
         "obj_recall=%.4f | obj_f1=%.4f",

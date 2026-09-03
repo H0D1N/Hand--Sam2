@@ -4,12 +4,12 @@ import logging
 
 import torch
 
-from .builder import build_sam2_modified_tiny
-from .dataset import build_center_point_prompt
-from .trainer import run_validation_epoch
-from .utils import configure_runtime, dump_json, set_seed
+from ...framewise_sam2_modified.builder import build_sam2_modified_tiny
+from ...framewise_sam2_modified.dataset import build_center_point_prompt
+from ...framewise_sam2_modified.trainer import run_validation_epoch
+from ...framewise_sam2_modified.utils import configure_runtime, dump_json, set_seed
 from projects.dual_hand_memory.dataset import collate_clip_batch
-from projects.zero_shot_common import build_zero_shot_loader, parse_args
+from projects.hardcases.evaluation_common import build_zero_shot_loader, parse_args
 
 
 def collate_tracking_frames(items):
@@ -54,7 +54,7 @@ def main() -> None:
     if args.channels_last and device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
 
-    point_prompt_fn = build_center_point_prompt if args.use_point_prompt else None
+    point_prompt_fn = build_center_point_prompt if args.prompt_mode == "point" else None
     validation_metrics = run_validation_epoch(
         model=model,
         loader=val_loader,

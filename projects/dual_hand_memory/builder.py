@@ -100,6 +100,40 @@ def build_sam2_dual_hand_memory_tiny(
 
     return model
 
+
+def load_sam2_dual_hand_memory_tiny(model_checkpoint, device="cpu"):
+    """按训练参数重建模型并加载完整的 Dual-hand Memory checkpoint。"""
+    model_checkpoint = Path(model_checkpoint)
+    if not model_checkpoint.is_file():
+        raise FileNotFoundError(f"Memory checkpoint not found: {model_checkpoint}")
+
+    checkpoint = torch.load(model_checkpoint, map_location="cpu", weights_only=False)
+    checkpoint_args = checkpoint["args"]
+    model = build_sam2_dual_hand_memory_tiny(
+        sam_checkpoint=checkpoint_args["sam_checkpoint"],
+        framewise_checkpoint=checkpoint_args["framewise_checkpoint"],
+        device=device,
+        mode="eval",
+        image_size=checkpoint_args["image_size"],
+        use_image_adapter=checkpoint_args["use_image_adapter"],
+        use_decoder_adapter=checkpoint_args["use_decoder_adapter"],
+        adapter_dim=checkpoint_args["adapter_dim"],
+        adapter_dropout=checkpoint_args["adapter_dropout"],
+        adapter_init_scale=checkpoint_args["adapter_init_scale"],
+        num_init_cond_frames_for_train=checkpoint_args["num_init_cond_frames_for_train"],
+        num_frames_to_correct_for_train=checkpoint_args["num_frames_to_correct_for_train"],
+        add_all_frames_to_correct_as_cond=checkpoint_args["add_all_frames_to_correct_as_cond"],
+        num_correction_pt_per_frame=checkpoint_args["num_correction_pt_per_frame"],
+    )
+    model.load_state_dict(checkpoint["model_state"], strict=True)
+    logging.info(
+        "Loaded Dual-hand Memory checkpoint | %s | epoch=%s",
+        model_checkpoint,
+        checkpoint.get("epoch", "unknown"),
+    )
+    return model.eval()
+
+
 def _configure_prompt_sampling(
     model,
     num_init_cond_frames_for_train,

@@ -18,7 +18,7 @@ from projects.framewise_sam2_modified.visualization import (
     save_dual_hand_memory_comparison_visualization,
 )
 from projects.hardcases.common import analyze_frame, analyze_transition, save_frame_case, save_temporal_case
-from projects.zero_shot_common import build_zero_shot_loader, parse_args
+from projects.hardcases.evaluation_common import build_zero_shot_loader, parse_args
 
 
 MAX_TRACKING_VISUALIZATIONS_PER_DATASET = 25
