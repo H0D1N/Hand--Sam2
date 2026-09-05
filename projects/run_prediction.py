@@ -145,10 +145,11 @@ def build_loader(args: argparse.Namespace) -> DataLoader:
 
 
 def prediction_path(image_path: str, directory_name: str) -> Path:
-    """例如 cam/rgb/0001.png -> cam/<directory_name>/0001.png。"""
+    """例如 cam/rgb_undistort/0001.png -> cam/<directory_name>/0001.png。"""
     image_path = Path(image_path)
     image_dir = image_path.parent
-    if image_dir.name.lower() in {"rgb", "color", "images"}:
+    image_dir_name = image_dir.name.lower()
+    if image_dir_name.startswith("rgb") or image_dir_name in {"color", "images"}:
         image_dir = image_dir.parent
     return image_dir / directory_name / image_path.with_suffix(".png").name
 
