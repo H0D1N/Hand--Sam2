@@ -1,8 +1,12 @@
 """遍历预测 mask 生成"原图 | mask 叠加图"左右拼接的总览视频。
 
 只以 mask-root 下已有的预测 mask 为基准：按相同 stem 回查 RGB 原图，
-拼接成帧后按"序列 x 相机"输出视频与逐帧 PNG；尚未推理的序列、相机和
-图片自动跳过，所有跳过与异常统一记录到问题报告 report.txt。
+拼接成帧后按"序列 x 相机"输出视频；尚未推理的序列、相机和图片自动
+跳过，所有跳过与异常统一记录到问题报告 report.txt。
+
+拼接帧的左侧为"原图 + GT 黄色细线轮廓"（同 framewise_sam2_modified/
+visualization.py 的 _gt_boundary），右侧为"原图 + 预测 mask 半透明叠加
++ GT 黄色细线轮廓"，左上角标注帧号 stem。
 
 mask-root 与 dataset-root 以下必须保持相同的相对层级：
 
@@ -12,7 +16,6 @@ mask-root 与 dataset-root 以下必须保持相同的相对层级：
 输出目录结构：
 
     output-dir/videos/<subject>/<ROM>/<camera>.mp4
-    output-dir/frames/<subject>/<ROM>/<camera>/<stem>.png
     output-dir/report.txt
 """
 
@@ -42,13 +45,14 @@ def parse_args() -> argparse.Namespace:
     io = parser.add_argument_group("io")
     io.add_argument("--dataset-root", type=Path, required=True, help="RGB 数据根目录")
     io.add_argument("--mask-root", type=Path, help="预测 mask 根目录；默认与 --dataset-root 相同")
-    io.add_argument("--output-dir", type=Path, required=True, help="视频、帧和问题报告输出目录")
+    io.add_argument("--output-dir", type=Path, required=True, help="视频和问题报告输出目录")
 
     layout = parser.add_argument_group("layout")
     layout.add_argument("--seq-glob", default="subject*/ROM*", help="序列目录 glob，相对数据根目录")
     layout.add_argument("--cam-name", default="cam*", help="相机目录 glob")
     layout.add_argument("--image-name", default="rgb", help="RGB 文件夹名称")
     layout.add_argument("--mask-name", default="masks-test", help="预测 mask 文件夹名称")
+    layout.add_argument("--gt-name", default="masks", help="GT mask 文件夹名称（dataset 侧，左边画黄色细线）")
 
     video = parser.add_argument_group("video")
     video.add_argument("--fps", type=float, default=10.0, help="输出视频帧率")
@@ -68,10 +72,10 @@ def natural_sort_key(text: str) -> tuple:
     )
 
 
-def find_rgb(rgb_dir: Path, stem: str) -> Path | None:
-    """按相同 stem 在 RGB 目录中查找原图，自动尝试常见扩展名。"""
-    for extension in IMAGE_EXTENSIONS:
-        candidate = rgb_dir / f"{stem}{extension}"
+def find_same_stem(directory: Path, stem: str, extensions) -> Path | None:
+    """按相同 stem 在目录中查找文件，自动尝试常见扩展名。"""
+    for extension in extensions:
+        candidate = directory / f"{stem}{extension}"
         if candidate.is_file():
             return candidate
     return None
@@ -87,8 +91,24 @@ def read_mask(mask_path: Path) -> np.ndarray | None:
     return mask
 
 
+def gt_boundary(gt_mask: np.ndarray, image_shape: tuple[int, int]) -> np.ndarray:
+    """提取 GT 的黄色细线轮廓；低分辨率图片用更细的轮廓。
+
+    同 projects/framewise_sam2_modified/visualization.py 的 _gt_boundary。
+    """
+    gt = (gt_mask > 0).astype(np.uint8)
+    if gt.shape[:2] != image_shape:
+        gt = cv2.resize(gt, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_NEAREST)
+    radius = min(2, max(1, round(min(image_shape) / 400)))
+    kernel = np.ones((2 * radius + 1, 2 * radius + 1), np.uint8)
+    return (cv2.dilate(gt, kernel) & cv2.dilate(1 - gt, kernel)).astype(bool)
+
+
 def build_overlay(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """把类别 mask 半透明叠加到原图上。"""
+    """把类别 mask 半透明叠加到原图上；只混合 mask 区域，背景保持原样。
+
+    同 projects/framewise_sam2_modified/visualization.py 的 _overlay。
+    """
     if mask.shape[:2] != rgb.shape[:2]:
         mask = cv2.resize(mask, (rgb.shape[1], rgb.shape[0]), interpolation=cv2.INTER_NEAREST)
     color_block = np.zeros_like(rgb)
@@ -96,7 +116,24 @@ def build_overlay(rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
     for value, color in OVERLAY_COLORS.items():
         color_block[mask == value] = color
     color_block[(mask != 0) & ~np.isin(mask, known_values)] = UNKNOWN_COLOR
-    return cv2.addWeighted(rgb, 1.0 - OVERLAY_ALPHA, color_block, OVERLAY_ALPHA, 0.0)
+
+    overlay = rgb.copy()
+    area = np.any(color_block != 0, axis=-1)
+    blended = (
+        rgb[area].astype(np.float32) * (1.0 - OVERLAY_ALPHA)
+        + color_block[area].astype(np.float32) * OVERLAY_ALPHA
+    )
+    overlay[area] = blended.round().astype(np.uint8)
+    return overlay
+
+
+def draw_frame_number(frame: np.ndarray, stem: str) -> None:
+    """在左上角画帧号，方便对照原帧。"""
+    font_scale = max(0.5, min(1.5, frame.shape[0] / 400))
+    thickness = max(1, round(font_scale))
+    origin = (round(8 * font_scale) + 4, round(28 * font_scale))
+    cv2.putText(frame, stem, origin, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+    cv2.putText(frame, stem, origin, cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
 
 def process_camera(
@@ -105,13 +142,13 @@ def process_camera(
     dataset_cam_dir: Path,
     mask_dir: Path,
     image_name: str,
+    gt_dir: Path,
     videos_dir: Path,
-    frames_dir: Path,
     fps: float,
     problems: list[str],
     stats: dict[str, int],
 ) -> None:
-    """为单个相机生成左右拼接的总览视频与逐帧 PNG。"""
+    """为单个相机生成"GT 细线 | 预测叠加"的左右拼接视频。"""
     mask_paths = sorted(
         (path for path in mask_dir.iterdir() if path.suffix.lower() in MASK_EXTENSIONS),
         key=lambda path: natural_sort_key(path.stem),
@@ -125,11 +162,16 @@ def process_camera(
         problems.append(f"[无RGB] {rel_cam}: dataset 下没有 {image_name} 目录")
         return
 
+    gt_dir_exists = gt_dir.is_dir()
+    if not gt_dir_exists:
+        problems.append(f"[无GT] {rel_cam}: dataset 下没有 {gt_dir.name} 目录")
+
     frames = []
     missing_rgb = []
+    missing_gt = []
     for mask_path in mask_paths:
         stem = mask_path.stem
-        rgb_path = find_rgb(rgb_dir, stem)
+        rgb_path = find_same_stem(rgb_dir, stem, IMAGE_EXTENSIONS)
         if rgb_path is None:
             missing_rgb.append(mask_path.name)
             continue
@@ -145,13 +187,39 @@ def process_camera(
             problems.append(
                 f"[尺寸不符] {rel_cam}/{mask_path.name}: mask {mask.shape[:2]} vs RGB {rgb.shape[:2]}"
             )
-        frames.append((stem, np.hstack([rgb, build_overlay(rgb, mask)])))
+
+        # 左侧：原图 + GT 黄色细线；右侧：原图 + 预测 mask 叠加 + GT 黄色细线
+        gt_line = None
+        if gt_dir_exists:
+            gt_path = find_same_stem(gt_dir, stem, MASK_EXTENSIONS)
+            if gt_path is None:
+                missing_gt.append(mask_path.name)
+            else:
+                gt = read_mask(gt_path)
+                if gt is None:
+                    problems.append(f"[坏GT] {rel_cam}/{mask_path.name}: 无法读取")
+                else:
+                    gt_line = gt_boundary(gt, rgb.shape[:2])
+
+        left_panel = rgb
+        right_panel = build_overlay(rgb, mask)
+        if gt_line is not None:
+            left_panel = rgb.copy()
+            left_panel[gt_line] = (0, 255, 255)
+            right_panel[gt_line] = (0, 255, 255)
+        frames.append((stem, np.hstack([left_panel, right_panel])))
 
     if missing_rgb:
         examples = ", ".join(missing_rgb[:10])
         if len(missing_rgb) > 10:
             examples += " ..."
         problems.append(f"[缺RGB] {rel_cam}: {len(missing_rgb)} 个 mask 找不到同 stem 原图: {examples}")
+
+    if missing_gt:
+        examples = ", ".join(missing_gt[:10])
+        if len(missing_gt) > 10:
+            examples += " ..."
+        problems.append(f"[缺GT] {rel_cam}: {len(missing_gt)} 帧找不到同 stem GT: {examples}")
 
     # 有 RGB 但没有对应 mask 的图片，以及不连续的帧号
     rgb_stems = {path.stem for path in rgb_dir.iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS}
@@ -176,13 +244,11 @@ def process_camera(
         problems.append(f"[写视频失败] {rel_cam}: {video_path}")
         return
 
-    cam_frames_dir = frames_dir / rel_cam
-    cam_frames_dir.mkdir(parents=True, exist_ok=True)
     try:
         for stem, frame in frames:
-            cv2.imwrite(str(cam_frames_dir / f"{stem}.png"), frame)
             if frame.shape[:2] != (height, width):
                 frame = cv2.resize(frame, (width, height))
+            draw_frame_number(frame, stem)
             writer.write(frame)
     finally:
         writer.release()
@@ -210,7 +276,6 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     videos_dir = args.output_dir / "videos"
-    frames_dir = args.output_dir / "frames"
     problems: list[str] = []
     stats = {"cameras": 0, "videos": 0, "frames": 0}
 
@@ -255,8 +320,8 @@ def main() -> None:
                 dataset_cam_dir=dataset_seq_dir / cam_dir.name,
                 mask_dir=mask_dir,
                 image_name=args.image_name,
+                gt_dir=dataset_seq_dir / cam_dir.name / args.gt_name,
                 videos_dir=videos_dir,
-                frames_dir=frames_dir,
                 fps=args.fps,
                 problems=problems,
                 stats=stats,
