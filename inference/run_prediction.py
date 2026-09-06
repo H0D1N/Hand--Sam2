@@ -10,23 +10,12 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from torch.utils.data import DataLoader
 
-from projects.dual_hand_memory.dataset import ConsecutiveClipDataset, collate_clip_batch
-from projects.framewise_sam2_modified.builder import (
-    create_sam2_modified_tiny,
-    inject_sam2_modified_adapters,
-)
-from projects.framewise_sam2_modified.dataset import (
-    CombinedStreamDataset,
-    DexYCBDataset,
-    MultiServerDualHandDataset,
-    build_center_point_prompt,
-    collate_batch,
-)
+from inference.builder import build_model
+from inference.dataset import build_frame_dataset, build_loader
+from projects.framewise_sam2_modified.dataset import build_center_point_prompt
 from projects.framewise_sam2_modified.utils import configure_runtime
-from training.model.sam2_dual_hand_memory import SAM2DualHandMemory
-from training.model.sam2_modified import SAM2Modified
+from sam2.modeling.sam2_utils import get_next_point
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     common.add_argument("--model", choices=("framewise", "memory"), required=True)
     common.add_argument("--model-checkpoint", type=Path, required=True)
     common.add_argument("--prediction-dir-name", help="每个图像目录对应的推理文件夹名；默认 <model>_prediction。")
-    common.add_argument("--batch-size", type=int, default=2)
+    common.add_argument("--batch-size", type=int)
     common.add_argument("--num-workers", type=int, default=4)
     common.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     common.add_argument("--amp", action="store_true")
@@ -64,84 +53,16 @@ def parse_args() -> argparse.Namespace:
 
     memory = parser.add_argument_group("memory")
     memory.add_argument("--prompt-mode", choices=("mask", "point", "auto"), default="mask")
-    memory.add_argument("--clip-length", type=int, default=8)
-    memory.add_argument("--clip-stride", type=int)
 
     args = parser.parse_args()
     args.prediction_dir_name = args.prediction_dir_name or f"{args.model}_prediction"
-    args.clip_stride = args.clip_stride or args.clip_length
+    if args.batch_size is None:
+        args.batch_size = 1 if args.model == "memory" else 2
+    if args.batch_size < 1 or (args.model == "memory" and args.batch_size != 1):
+        parser.error("batch-size 必须为正整数，memory 推理仅支持 --batch-size 1")
     if args.dataset in {"dexycb", "mixed"} and args.dex_ycb_root is None:
         parser.error(f"--dataset {args.dataset} 需要 --dex-ycb-root")
     return args
-
-
-def build_model(args: argparse.Namespace) -> torch.nn.Module:
-    checkpoint = torch.load(args.model_checkpoint, map_location="cpu", weights_only=False)
-    saved_args = checkpoint["args"]
-    model_cls = SAM2DualHandMemory if args.model == "memory" else SAM2Modified
-    model = create_sam2_modified_tiny(
-        image_size=saved_args["image_size"],
-        model_cls=model_cls,
-    )
-    inject_sam2_modified_adapters(
-        model=model,
-        use_image_adapter=saved_args["use_image_adapter"],
-        use_decoder_adapter=saved_args["use_decoder_adapter"],
-        adapter_dim=saved_args["adapter_dim"],
-        adapter_dropout=saved_args["adapter_dropout"],
-        adapter_init_scale=saved_args["adapter_init_scale"],
-    )
-    model.load_state_dict(checkpoint["model_state"], strict=True)
-    model = model.to(args.device).eval()
-    args.image_size = saved_args["image_size"]
-    logging.info("Loaded %s checkpoint: %s", args.model, args.model_checkpoint)
-    return model
-
-
-def build_frame_dataset(args: argparse.Namespace):
-    datasets = []
-    if args.dataset in {"multiserver", "mixed"}:
-        datasets.append(MultiServerDualHandDataset(
-            dataset_root=args.dataset_root,
-            split="val",
-            test_seq_count=args.test_seq_count,
-            image_size=args.image_size,
-            use_augmentation=False,
-            dataset_names=args.dataset_names,
-        ))
-    if args.dataset in {"dexycb", "mixed"}:
-        datasets.append(DexYCBDataset(
-            dataset_root=args.dex_ycb_root,
-            split="val",
-            setup=args.dex_ycb_setup,
-            image_size=args.image_size,
-            use_augmentation=False,
-        ))
-    return datasets[0] if len(datasets) == 1 else CombinedStreamDataset(datasets)
-
-
-def build_loader(args: argparse.Namespace) -> DataLoader:
-    dataset = build_frame_dataset(args)
-    collate_fn = collate_batch
-    if args.model == "memory":
-        dataset = ConsecutiveClipDataset(
-            dataset,
-            clip_length=args.clip_length,
-            clip_stride=args.clip_stride,
-        )
-        collate_fn = collate_clip_batch
-
-    loader_args = dict(
-        dataset=dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=torch.device(args.device).type == "cuda",
-        collate_fn=collate_fn,
-    )
-    if args.num_workers > 0:
-        loader_args.update(persistent_workers=True, prefetch_factor=2)
-    return DataLoader(**loader_args)
 
 
 def prediction_path(image_path: str, directory_name: str) -> Path:
@@ -215,40 +136,41 @@ def predict_framewise(model, loader, args) -> int:
 
 
 @torch.inference_mode()
-def predict_memory(model, loader, args) -> int:
+def predict_memory(model, dataset, args) -> int:
     count = 0
-    device = torch.device(args.device)
-    for step, batch in enumerate(loader, start=1):
-        images = batch["image"].to(device, non_blocking=True)
-        left_masks = batch["left_mask"].to(device, non_blocking=True)
-        right_masks = batch["right_mask"].to(device, non_blocking=True)
+    for stream_id, stream in dataset.streams.items():
+        loader = build_loader(dataset, args, sample_indices=stream["sample_indices"])
+        state = model.init_state(loader)
+        for hand in ("left", "right"):
+            mask = state["first_frame"][f"{hand}_mask"]
+            if args.prompt_mode == "point":
+                coords, labels = get_next_point(gt_masks=mask.bool(), pred_masks=None, method=model.pt_sampling_for_eval)
+                model.add_points(state, hand, {"point_coords": coords, "point_labels": labels})
+                del coords, labels
+            else:
+                model.add_mask(state, hand, mask)
+        del mask
         with _autocast(args):
-            frame_outputs = model(
-                images=images,
-                left_masks=left_masks,
-                right_masks=right_masks,
-                prompt_mode=args.prompt_mode,
-            )
-        for sample_index in range(images.size(0)):
-            for frame_index, outputs in enumerate(frame_outputs):
+            for frame_idx, outputs, frame_info in model.propagate_in_video(state):
                 save_prediction(
-                    image_path=batch["image_path"][sample_index][frame_index],
-                    original_size=batch["original_size"][sample_index][frame_index],
-                    left_logits=outputs["left"]["pred_masks_high_res"][sample_index:sample_index + 1],
-                    right_logits=outputs["right"]["pred_masks_high_res"][sample_index:sample_index + 1],
+                    image_path=frame_info["image_path"], original_size=frame_info["original_size"],
+                    left_logits=outputs["left"]["pred_masks_high_res"],
+                    right_logits=outputs["right"]["pred_masks_high_res"],
                     prediction_dir_name=args.prediction_dir_name,
                 )
                 count += 1
-        if step % args.log_interval == 0 or step == len(loader):
-            logging.info("memory | %d/%d batches | %d images", step, len(loader), count)
+                if (frame_idx + 1) % args.log_interval == 0 or frame_idx + 1 == state["num_frames"]:
+                    logging.info("memory | %s | %d/%d frames | %d images", stream_id, frame_idx + 1, state["num_frames"], count)
+                del outputs
+        del state, loader
     return count
 
 
-def run_prediction(model, loader, args) -> int:
-    """统一推理入口；模型差异只在这里分发。"""
+def run_prediction(model, dataset, args) -> int:
+    """统一推理入口；memory 按 stream 逐帧传播。"""
     if args.model == "framewise":
-        return predict_framewise(model, loader, args)
-    return predict_memory(model, loader, args)
+        return predict_framewise(model, build_loader(dataset, args), args)
+    return predict_memory(model, dataset, args)
 
 
 def main() -> None:
@@ -256,8 +178,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     configure_runtime(torch.device(args.device), use_tf32=True)
     model = build_model(args)
-    loader = build_loader(args)
-    count = run_prediction(model, loader, args)
+    dataset = build_frame_dataset(args)
+    count = run_prediction(model, dataset, args)
     logging.info("Prediction complete | %d images", count)
 
 
