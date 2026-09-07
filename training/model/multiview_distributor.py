@@ -48,14 +48,7 @@ class MultiViewFeatureDistributor(nn.Module):
     将共享特征 [B, M, C] 分发回各视角 [B, V, N, C]。
     """
 
-    def __init__(
-        self,
-        d_model: int,
-        layer: MultiViewDistributionLayer,
-        num_layers: int,
-        num_views: int,
-        num_latents: int,
-    ) -> None:
+    def __init__(self, d_model, layer, num_layers):
         super().__init__()
 
         self.d_model = d_model
