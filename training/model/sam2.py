@@ -634,6 +634,7 @@ class SAM2Train(SAM2Base):
         object_score_logits,
         current_out,
         sam_head=None,
+        num_correction_points_per_frame=None,
     ):
 
         assert gt_masks is not None
@@ -641,6 +642,8 @@ class SAM2Train(SAM2Base):
         # 原版使用默认 SAM head；双手模型传入绑定了当前手 Decoder 的 sam_head。
         if sam_head is None:
             sam_head = self._forward_sam_heads
+        if num_correction_points_per_frame is None:
+            num_correction_points_per_frame = self.num_correction_pt_per_frame
 
         all_pred_masks = [low_res_masks]
         all_pred_high_res_masks = [high_res_masks]
@@ -649,7 +652,7 @@ class SAM2Train(SAM2Base):
         all_pred_ious = [ious]
         all_point_inputs = [point_inputs]
         all_object_score_logits = [object_score_logits]
-        for _ in range(self.num_correction_pt_per_frame):
+        for _ in range(num_correction_points_per_frame):
             # sample a new point from the error between prediction and ground-truth
             # (with a small probability, directly sample from GT masks instead of errors)
             if self.training and self.prob_to_sample_from_gt_for_train > 0:
