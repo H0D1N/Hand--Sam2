@@ -28,8 +28,35 @@ SAM2_MEAN = [0.485, 0.456, 0.406]
 SAM2_STD = [0.229, 0.224, 0.225]
 
 
+def _find_image_mask_pairs(image_dir: Path, mask_dir: Path, dataset_config: dict):
+    """按照配置的扩展名扫描文件，并按 stem 配对图片与 mask。"""
+
+    image_extensions = {suffix.lower() for suffix in dataset_config.get("image_extensions", [".png"])}
+    mask_extensions = {suffix.lower() for suffix in dataset_config.get("mask_extensions", [".png"])}
+    masks_by_stem = {}
+
+    for mask_path in sorted(mask_dir.iterdir()):
+        if mask_path.is_file() and mask_path.suffix.lower() in mask_extensions:
+            masks_by_stem.setdefault(mask_path.stem, []).append(mask_path)
+
+    pairs = []
+    for image_path in sorted(image_dir.iterdir()):
+        if not image_path.is_file() or image_path.suffix.lower() not in image_extensions:
+            continue
+        mask_paths = masks_by_stem.get(image_path.stem)
+        if not mask_paths:
+            continue
+        mask_path = next(
+            (path for path in mask_paths if path.suffix.lower() == image_path.suffix.lower()),
+            mask_paths[0],
+        )
+        pairs.append((image_path, mask_path))
+
+    return pairs
+
+
 def _find_valid_cameras(sequence_dir: Path, dataset_config: dict) -> list[str]:
-    """返回至少包含一对同名图片和 mask 的相机。"""
+    """返回至少包含一对同 stem 图片和 mask 的相机。"""
 
     view_glob = dataset_config["view_glob"]
     view_globs = view_glob if isinstance(view_glob, list) else [view_glob]
@@ -42,10 +69,7 @@ def _find_valid_cameras(sequence_dir: Path, dataset_config: dict) -> list[str]:
     for camera_name in camera_names:
         image_dir = sequence_dir / dataset_config["rgb_dir"].format(view=camera_name)
         mask_dir = sequence_dir / dataset_config["mask_dir"].format(view=camera_name)
-        if image_dir.is_dir() and mask_dir.is_dir() and any(
-            (mask_dir / image_path.name).is_file()
-            for image_path in image_dir.glob("*.png")
-        ):
+        if image_dir.is_dir() and mask_dir.is_dir() and _find_image_mask_pairs(image_dir, mask_dir, dataset_config):
             valid_cameras.append(camera_name)
 
     return valid_cameras
@@ -160,6 +184,7 @@ class MultiServerDualHandDataset(Dataset):
         # 3. 得到每个 dataset 对应的 ROM 列表和 cam 名称列表
         seq_dirs_list = []
         cam_names_by_sequence_list = []
+        local_dataset_roots = []
 
         for dataset_name in dataset_names:
             dataset_config = dataset_config_by_name[dataset_name]
@@ -217,6 +242,7 @@ class MultiServerDualHandDataset(Dataset):
 
             seq_dirs_list.append(current_sequence_dirs)
             cam_names_by_sequence_list.append(cam_names_by_sequence)
+            local_dataset_roots.append(local_dataset_root)
             selected_cameras = sorted({
                 camera_name
                 for sequence_dir in current_sequence_dirs
@@ -229,7 +255,7 @@ class MultiServerDualHandDataset(Dataset):
                 flush=True,
             )
 
-        # 4. 按 dataset、序列和 cam 收集同名的图片与 mask
+        # 4. 按 dataset、序列和 cam 收集同 stem 的图片与 mask
         for dataset_index, dataset_name in enumerate(dataset_names):
             dataset_config = dataset_config_by_name[dataset_name]
             sample_count_before = len(self.samples)
@@ -251,8 +277,6 @@ class MultiServerDualHandDataset(Dataset):
                         print("找不到 mask 文件夹:", mask_dir)
                         continue
 
-                    image_paths = sorted(image_dir.glob("*.png"))
-
                     stream_id = (
                         f"{dataset_name}/"
                         f"{sequence_dir.name}/"
@@ -261,12 +285,7 @@ class MultiServerDualHandDataset(Dataset):
                     stream_sample_indices = []
                     stream_frame_numbers = [] # 时序会用
 
-                    for image_path in image_paths:
-                        mask_path = mask_dir / image_path.name
-
-                        if not mask_path.is_file():
-                            continue
-
+                    for image_path, mask_path in _find_image_mask_pairs(image_dir, mask_dir, dataset_config):
                         sample_index = len(self.samples)
 
                         relative_image_path = image_path.relative_to(
@@ -283,6 +302,7 @@ class MultiServerDualHandDataset(Dataset):
                             {
                                 "image_path": image_path,
                                 "mask_path": mask_path,
+                                "dataset_root": local_dataset_roots[dataset_index],
                                 "dataset_name": dataset_name,
                                 "sample_id": sample_id,
                             }
@@ -423,6 +443,7 @@ class MultiServerDualHandDataset(Dataset):
             "original_right_mask": original_right_mask,
             "image_path": str(image_path),
             "mask_path": str(mask_path),
+            "dataset_root": str(sample["dataset_root"]),
             "sample_id": sample["sample_id"],
             "dataset_name": sample["dataset_name"],
         }
@@ -601,6 +622,7 @@ class DexYCBDataset(Dataset):
             "original_right_mask": original_right_mask,
             "image_path": str(image_path),
             "mask_path": str(mask_path),
+            "dataset_root": str(self.dataset_root),
             "sample_id": sample_id,
             "dataset_name": self.dataset_name,
         }
@@ -647,6 +669,7 @@ def collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
 
         "image_path": [item["image_path"] for item in batch],
         "mask_path": [item["mask_path"] for item in batch],
+        "dataset_root": [item.get("dataset_root") for item in batch],
 
         "sample_id": [item["sample_id"] for item in batch],
         "dataset_name": [item["dataset_name"] for item in batch],

@@ -40,7 +40,7 @@ class SAM2DualHandVideoPredictor(SAM2DualHandMemory):
         while state["frame_idx"] < state["num_frames"]:
             frame_idx = state["frame_idx"]
             batch = state.pop("first_frame") if frame_idx == 0 else next(state["iterator"])
-            frame_info = {key: batch[key][0] for key in ("image_path", "original_size")}
+            frame_info = {key: batch[key][0] for key in ("image_path", "original_size", "dataset_root")}
             images = batch["image"].to(device, non_blocking=True)
             backbone_out = self.forward_image(images)
             backbone_out, vision_feats, vision_pos, feat_sizes = self._prepare_backbone_features(backbone_out)

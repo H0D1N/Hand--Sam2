@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     common.add_argument("--model", choices=("framewise", "memory"), required=True)
     common.add_argument("--model-checkpoint", type=Path, required=True)
     common.add_argument("--prediction-dir-name", help="每个图像目录对应的推理文件夹名；默认 <model>_prediction。")
+    common.add_argument("--output-dir", type=Path, help="输出根目录；默认写回原图对应的相机目录。")
     common.add_argument("--batch-size", type=int)
     common.add_argument("--num-workers", type=int, default=4)
     common.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -65,14 +66,24 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def prediction_path(image_path: str, directory_name: str) -> Path:
-    """例如 cam/rgb_undistort/0001.png -> cam/<directory_name>/0001.png。"""
+def prediction_path(
+    image_path: str,
+    directory_name: str,
+    output_dir: str | Path | None = None,
+    dataset_root: str | Path | None = None,
+) -> Path:
+    """把 dataset_root 替换为 output_dir，并保留 sequence/camera 层级。"""
     image_path = Path(image_path)
     image_dir = image_path.parent
     image_dir_name = image_dir.name.lower()
     if image_dir_name.startswith("rgb") or image_dir_name in {"color", "images"}:
         image_dir = image_dir.parent
-    return image_dir / directory_name / image_path.with_suffix(".png").name
+    output_root = image_dir
+    if output_dir is not None:
+        if dataset_root is None:
+            raise ValueError("指定 output_dir 时需要 dataset_root")
+        output_root = Path(output_dir) / image_dir.relative_to(dataset_root)
+    return output_root / directory_name / image_path.with_suffix(".png").name
 
 
 def save_prediction(
@@ -82,6 +93,8 @@ def save_prediction(
     left_logits: torch.Tensor,
     right_logits: torch.Tensor,
     prediction_dir_name: str,
+    output_dir: str | Path | None = None,
+    dataset_root: str | Path | None = None,
 ) -> None:
     size = tuple(int(value) for value in original_size)
     left_logits = F.interpolate(left_logits.float(), size=size, mode="bilinear", align_corners=False)[0, 0]
@@ -90,12 +103,12 @@ def save_prediction(
     right_mask = right_logits > 0
 
     label = torch.zeros(size, dtype=torch.uint8, device=left_logits.device)
-    label[left_mask] = 1
-    label[right_mask] = 2
+    label[left_mask] = 2
+    label[right_mask] = 1
     overlap = left_mask & right_mask
     label[overlap & (left_logits >= right_logits)] = 1
 
-    mask_path = prediction_path(image_path, prediction_dir_name)
+    mask_path = prediction_path(image_path, prediction_dir_name, output_dir, dataset_root)
     mask_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(label.cpu().numpy()).save(mask_path)
 
@@ -128,6 +141,8 @@ def predict_framewise(model, loader, args) -> int:
                 left_logits=outputs["left"]["high_res_masks"][index:index + 1],
                 right_logits=outputs["right"]["high_res_masks"][index:index + 1],
                 prediction_dir_name=args.prediction_dir_name,
+                output_dir=getattr(args, "output_dir", None),
+                dataset_root=batch["dataset_root"][index],
             )
             count += 1
         if step % args.log_interval == 0 or step == len(loader):
@@ -157,6 +172,8 @@ def predict_memory(model, dataset, args) -> int:
                     left_logits=outputs["left"]["pred_masks_high_res"],
                     right_logits=outputs["right"]["pred_masks_high_res"],
                     prediction_dir_name=args.prediction_dir_name,
+                    output_dir=getattr(args, "output_dir", None),
+                    dataset_root=frame_info["dataset_root"],
                 )
                 count += 1
                 if (frame_idx + 1) % args.log_interval == 0 or frame_idx + 1 == state["num_frames"]:
