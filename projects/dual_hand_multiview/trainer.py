@@ -37,6 +37,7 @@ def run_training_epoch(
     amp_enabled = device.type == "cuda" and args.amp
     max_vis_per_dataset = getattr(args, "max_vis_per_dataset", 100)
     num_vis_saved_per_dataset = {}
+    num_sequences_per_dataset = {}
 
     for step, batch in enumerate(loader, start=1):
         images = batch["image"].to(device, non_blocking=True)
@@ -112,20 +113,23 @@ def run_training_epoch(
 
         if not args.skip_visualizations:
             for clip_idx, dataset_name in enumerate(batch["dataset_name"]):
+                step_counts = [output["left"]["multistep_pred_masks_high_res"].size(1) for output in frame_outputs]
+                num_images = sum(step_counts)
                 num_saved = num_vis_saved_per_dataset.get(dataset_name, 0)
-                if num_saved >= max_vis_per_dataset:
+                if max(step_counts) == 1 or num_saved + num_images > max_vis_per_dataset:
                     continue
-                num_saved += visualization_fn(
+                sequence_idx = num_sequences_per_dataset.get(dataset_name, 0)
+                visualization_fn(
                     batch=batch,
                     frame_outputs=frame_outputs,
                     clip_idx=clip_idx,
-                    start_idx=num_saved,
+                    sequence_idx=sequence_idx,
                     split="train",
                     epoch=epoch,
                     args=args,
-                    max_images=max_vis_per_dataset - num_saved,
                 )
-                num_vis_saved_per_dataset[dataset_name] = num_saved
+                num_vis_saved_per_dataset[dataset_name] = num_saved + num_images
+                num_sequences_per_dataset[dataset_name] = sequence_idx + 1
 
         if step % args.log_interval == 0 or step == num_steps:
             mean_losses = {
@@ -186,6 +190,7 @@ def run_validation_epoch(
     }
     max_vis_per_dataset = getattr(args, "max_vis_per_dataset", 100)
     num_vis_saved_per_dataset = {}
+    num_sequences_per_dataset = {}
 
     for step, batch in enumerate(loader, start=1):
         images = batch["image"].to(device, non_blocking=True)
@@ -295,19 +300,20 @@ def run_validation_epoch(
         if not args.skip_visualizations:
             for clip_idx, dataset_name in enumerate(batch["dataset_name"]):
                 num_saved = num_vis_saved_per_dataset.get(dataset_name, 0)
-                if num_saved >= max_vis_per_dataset:
+                if num_saved + num_frames > max_vis_per_dataset:
                     continue
-                num_saved += visualization_fn(
+                sequence_idx = num_sequences_per_dataset.get(dataset_name, 0)
+                visualization_fn(
                     batch=batch,
                     frame_outputs=frame_outputs,
                     clip_idx=clip_idx,
-                    start_idx=num_saved,
+                    sequence_idx=sequence_idx,
                     split="val",
                     epoch=epoch,
                     args=args,
-                    max_images=max_vis_per_dataset - num_saved,
                 )
-                num_vis_saved_per_dataset[dataset_name] = num_saved
+                num_vis_saved_per_dataset[dataset_name] = num_saved + num_frames
+                num_sequences_per_dataset[dataset_name] = sequence_idx + 1
 
         if step % args.log_interval == 0 or step == len(loader):
             overall = stats["overall"]
