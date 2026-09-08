@@ -11,9 +11,9 @@ from projects.framewise_sam2_modified.visualization import _display_image, _gt_b
 
 
 def _make_hand_panel(image, pred_logits, gt_mask, hand, view_name, normalized, point_input, initial_points, point_scale, title):
-    image = _display_image(image, normalized=normalized)
-    pred_logits = pred_logits.reshape(1, 1, *pred_logits.shape[-2:])
-    gt_mask = gt_mask.reshape(1, 1, *gt_mask.shape[-2:])
+    image = _display_image(image, normalized=normalized).cpu()
+    pred_logits = pred_logits.detach().reshape(1, 1, *pred_logits.shape[-2:]).cpu()
+    gt_mask = gt_mask.detach().reshape(1, 1, *gt_mask.shape[-2:]).cpu()
     iou = iou_target_from_logits(pred_logits, gt_mask).item()
 
     panel = _overlay(image, **{hand: pred_logits > 0})
