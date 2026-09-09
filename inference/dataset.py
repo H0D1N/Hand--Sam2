@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import cv2
@@ -96,10 +97,18 @@ def _build_frame_item(
     }
 
 
+def _natural_sort_key(path: Path) -> tuple:
+    parts = re.split(r"(\d+)", path.name.casefold())
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part)
+        for part in parts
+    ) + ((2, path.name.casefold()),)
+
+
 def _find_images(image_dir: Path, config: dict) -> list[Path]:
     extensions = {suffix.lower() for suffix in config.get("image_extensions", [".png"])}
     return [
-        path for path in sorted(image_dir.iterdir())
+        path for path in sorted(image_dir.iterdir(), key=_natural_sort_key)
         if path.is_file() and path.suffix.lower() in extensions
     ]
 
@@ -107,7 +116,7 @@ def _find_images(image_dir: Path, config: dict) -> list[Path]:
 def _find_mask(image_path: Path, mask_dir: Path, config: dict) -> Path | None:
     extensions = {suffix.lower() for suffix in config.get("mask_extensions", [".png"])}
     candidates = [
-        path for path in sorted(mask_dir.iterdir())
+        path for path in sorted(mask_dir.iterdir(), key=_natural_sort_key)
         if path.is_file()
         and path.stem == image_path.stem
         and path.suffix.lower() in extensions
@@ -172,8 +181,11 @@ class FirstFrameMaskMultiServerDataset(Dataset):
                 raise FileNotFoundError(f"本地数据集目录不存在: {local_root}")
 
             sequence_dirs = sorted(
-                path for path in local_root.glob(config["sequence_glob"])
-                if path.is_dir()
+                (
+                    path for path in local_root.glob(config["sequence_glob"])
+                    if path.is_dir()
+                ),
+                key=_natural_sort_key,
             )
             valid_sequences = []
             cameras_by_sequence = {}
@@ -182,7 +194,11 @@ class FirstFrameMaskMultiServerDataset(Dataset):
 
             for sequence_dir in sequence_dirs:
                 valid_cameras = []
-                for camera_dir in sorted(path for path in sequence_dir.iterdir() if path.is_dir()):
+                camera_dirs = sorted(
+                    (path for path in sequence_dir.iterdir() if path.is_dir()),
+                    key=_natural_sort_key,
+                )
+                for camera_dir in camera_dirs:
                     if not any(camera_dir.match(pattern) for pattern in view_globs):
                         continue
                     image_dir = sequence_dir / config["rgb_dir"].format(view=camera_dir.name)
