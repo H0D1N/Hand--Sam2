@@ -87,7 +87,7 @@ def parse_args():
     parser.add_argument("--iou-loss-weight", type=float, default=1.0)
     parser.add_argument("--class-loss-weight", type=float, default=1.0)
     parser.add_argument("--optimizer", choices=("adam", "adamw", "radam"), default="adamw")
-    parser.add_argument("--lr", type=float, default=5e-6)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--max-grad-norm", type=float, default=0.1)

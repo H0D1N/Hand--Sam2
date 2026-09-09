@@ -25,6 +25,7 @@ class MultiViewDistributionLayer(nn.Module):
         self.cross_attention_norm = nn.LayerNorm(d_model)
         self.cross_attn = cross_attention
         self.cross_attention_dropout = nn.Dropout(dropout)
+        self.residual_scale = nn.Parameter(torch.tensor(1e-3))
 
     def forward(
         self,
@@ -40,7 +41,7 @@ class MultiViewDistributionLayer(nn.Module):
             v=shared_tokens,
         )
 
-        return view_tokens + self.cross_attention_dropout(delta)
+        return view_tokens + self.residual_scale * self.cross_attention_dropout(delta)
 
 
 class MultiViewFeatureDistributor(nn.Module):
@@ -53,7 +54,6 @@ class MultiViewFeatureDistributor(nn.Module):
 
         self.d_model = d_model
         self.layers = get_clones(layer, num_layers)
-        self.norm = nn.LayerNorm(d_model)
 
     def forward(
         self,
@@ -82,6 +82,6 @@ class MultiViewFeatureDistributor(nn.Module):
             )
 
         # [B,V*N,C] -> [B,V,N,C]
-        distributed_features = self.norm(view_tokens).reshape(B, V, N, C)
+        distributed_features = view_tokens.reshape(B, V, N, C)
 
         return distributed_features
