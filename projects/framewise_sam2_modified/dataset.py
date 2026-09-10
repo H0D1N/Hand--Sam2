@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, ConcatDataset
+from torchvision.transforms import InterpolationMode, RandomResizedCrop
 from torchvision.transforms import functional as TF
 
 from .frame_sampler import FramesPerSecondSampler
@@ -26,6 +27,158 @@ except ModuleNotFoundError:
 
 SAM2_MEAN = [0.485, 0.456, 0.406]
 SAM2_STD = [0.229, 0.224, 0.225]
+
+
+def _sample_color_jitter(images: torch.Tensor) -> torch.Tensor:
+    """对一组时间帧使用同一组颜色扰动参数。"""
+
+    brightness = 0.85 + 0.30 * torch.rand(()).item()
+    contrast = 0.85 + 0.30 * torch.rand(()).item()
+    saturation = 0.85 + 0.30 * torch.rand(()).item()
+    hue = -0.03 + 0.06 * torch.rand(()).item()
+
+    for transform_index in torch.randperm(4).tolist():
+        if transform_index == 0:
+            images = TF.adjust_brightness(images, brightness)
+        elif transform_index == 1:
+            images = TF.adjust_contrast(images, contrast)
+        elif transform_index == 2:
+            images = TF.adjust_saturation(images, saturation)
+        else:
+            images = TF.adjust_hue(images, hue)
+
+    return images
+
+
+def _resized_crop_clip(
+    tensors: torch.Tensor,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
+    output_size: list[int],
+    interpolation: InterpolationMode,
+    antialias: bool | None = None,
+) -> torch.Tensor:
+    """展平 Clip 维度，让 torchvision 只处理标准 NCHW 张量。"""
+
+    leading_shape = tensors.shape[:-3]
+    flattened = tensors.reshape(-1, *tensors.shape[-3:])
+    cropped = TF.resized_crop(
+        flattened,
+        top,
+        left,
+        height,
+        width,
+        output_size,
+        interpolation=interpolation,
+        antialias=antialias,
+    )
+    return cropped.reshape(*leading_shape, *cropped.shape[-3:])
+
+
+def augment_dual_hand_clip(
+    images: torch.Tensor,
+    left_masks: torch.Tensor,
+    right_masks: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    增强单视角 [T,C,H,W] 或多视角 [V,T,C,H,W] Clip。
+
+    几何参数在整个 Clip 的所有视角和时间帧间共享；颜色参数在同一
+    视角的时间帧间共享，不同视角分别采样。
+    """
+
+    if images.ndim not in {4, 5}:
+        raise ValueError(f"images 必须是 4D 或 5D，当前 shape={tuple(images.shape)}")
+    expected_mask_shape = (*images.shape[:-3], 1, *images.shape[-2:])
+    if left_masks.shape != expected_mask_shape or right_masks.shape != expected_mask_shape:
+        raise ValueError(
+            "image/mask shape 不匹配："
+            f"image={tuple(images.shape)}, left={tuple(left_masks.shape)}, "
+            f"right={tuple(right_masks.shape)}"
+        )
+
+    channel_shape = (1,) * (images.ndim - 3) + (3, 1, 1)
+    mean = images.new_tensor(SAM2_MEAN).view(channel_shape)
+    std = images.new_tensor(SAM2_STD).view(channel_shape)
+    images = (images * std + mean).clamp(0.0, 1.0)
+
+    # 所有视角和时间帧共享水平翻转，左右手标签表示解剖学身份，不交换通道。
+    if torch.rand(()).item() < 0.5:
+        images = TF.hflip(images)
+        left_masks = TF.hflip(left_masks)
+        right_masks = TF.hflip(right_masks)
+
+    # 只接受不会大量裁掉任一已出现手部的 crop。
+    if torch.rand(()).item() < 0.5:
+        hand_masks = torch.cat((left_masks, right_masks), dim=-3)
+        original_areas = hand_masks.sum(dim=(-2, -1))
+        present = original_areas > 0
+        crop_params = None
+
+        for _ in range(10):
+            top, left, height, width = RandomResizedCrop.get_params(
+                images.reshape(-1, *images.shape[-3:])[0],
+                scale=(0.85, 1.0),
+                ratio=(0.95, 1.05),
+            )
+            cropped_areas = hand_masks[..., top:top + height, left:left + width].sum(
+                dim=(-2, -1)
+            )
+            retains_hands = torch.all(
+                cropped_areas[present] >= 0.7 * original_areas[present]
+            )
+            if not present.any() or retains_hands:
+                crop_params = (top, left, height, width)
+                break
+
+        if crop_params is not None:
+            top, left, height, width = crop_params
+            output_size = list(images.shape[-2:])
+            images = _resized_crop_clip(
+                images,
+                top,
+                left,
+                height,
+                width,
+                output_size,
+                interpolation=InterpolationMode.BILINEAR,
+                antialias=True,
+            )
+            left_masks = _resized_crop_clip(
+                left_masks,
+                top,
+                left,
+                height,
+                width,
+                output_size,
+                interpolation=InterpolationMode.NEAREST,
+            )
+            right_masks = _resized_crop_clip(
+                right_masks,
+                top,
+                left,
+                height,
+                width,
+                output_size,
+                interpolation=InterpolationMode.NEAREST,
+            )
+
+    if images.ndim == 4:
+        if torch.rand(()).item() < 0.8:
+            images = _sample_color_jitter(images)
+    else:
+        images = torch.stack([
+            _sample_color_jitter(view_images)
+            if torch.rand(()).item() < 0.8 else view_images
+            for view_images in images
+        ])
+
+    images = (images.clamp(0.0, 1.0) - mean) / std
+    left_masks = (left_masks > 0.5).to(left_masks.dtype)
+    right_masks = (right_masks > 0.5).to(right_masks.dtype)
+    return images, left_masks, right_masks
 
 
 def _find_image_mask_pairs(image_dir: Path, mask_dir: Path, dataset_config: dict):

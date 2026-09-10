@@ -5,7 +5,12 @@ from itertools import combinations
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from projects.framewise_sam2_modified.dataset import CombinedStreamDataset, DexYCBDataset, MultiServerDualHandDataset
+from projects.framewise_sam2_modified.dataset import (
+    CombinedStreamDataset,
+    DexYCBDataset,
+    MultiServerDualHandDataset,
+    augment_dual_hand_clip,
+)
 
 
 class MultiViewConsecutiveClipDataset(Dataset):
@@ -18,7 +23,14 @@ class MultiViewConsecutiveClipDataset(Dataset):
         right_mask: [V, T, 1, H, W]
     """
 
-    def __init__(self, frame_dataset, num_views=2, clip_length=8, clip_stride=8):
+    def __init__(
+        self,
+        frame_dataset,
+        num_views=2,
+        clip_length=8,
+        clip_stride=8,
+        use_augmentation=False,
+    ):
         if num_views < 2:
             raise ValueError("num_views 必须至少为 2")
         if clip_length < 2:
@@ -27,6 +39,7 @@ class MultiViewConsecutiveClipDataset(Dataset):
             raise ValueError("clip_stride 必须大于 0")
 
         self.frame_dataset = frame_dataset
+        self.use_augmentation = use_augmentation
         self.clips = []
 
         # 1. 按 sequence 聚合各个 view
@@ -82,10 +95,28 @@ class MultiViewConsecutiveClipDataset(Dataset):
             for indices in clip["sample_indices"]
         ]
 
+        images = torch.stack([
+            torch.stack([frame["image"] for frame in frames])
+            for frames in views
+        ])
+        left_masks = torch.stack([
+            torch.stack([frame["left_mask"] for frame in frames])
+            for frames in views
+        ])
+        right_masks = torch.stack([
+            torch.stack([frame["right_mask"] for frame in frames])
+            for frames in views
+        ])
+
+        if self.use_augmentation:
+            images, left_masks, right_masks = augment_dual_hand_clip(
+                images, left_masks, right_masks
+            )
+
         return {
-            "image": torch.stack([torch.stack([frame["image"] for frame in frames]) for frames in views]),
-            "left_mask": torch.stack([torch.stack([frame["left_mask"] for frame in frames]) for frames in views]),
-            "right_mask": torch.stack([torch.stack([frame["right_mask"] for frame in frames]) for frames in views]),
+            "image": images,
+            "left_mask": left_masks,
+            "right_mask": right_masks,
 
             "original_size": [[frame["original_size"] for frame in frames] for frames in views],
             "original_image": [[frame["original_image"] for frame in frames] for frames in views],
@@ -169,12 +200,14 @@ def build_dataloaders(args, device):
         num_views=args.num_views,
         clip_length=args.clip_length,
         clip_stride=args.clip_stride,
+        use_augmentation=not args.disable_augmentation,
     )
     val_dataset = MultiViewConsecutiveClipDataset(
         frame_datasets["val"],
         num_views=args.num_views,
         clip_length=args.clip_length,
         clip_stride=args.val_clip_stride,
+        use_augmentation=False,
     )
 
     if len(train_dataset) == 0:

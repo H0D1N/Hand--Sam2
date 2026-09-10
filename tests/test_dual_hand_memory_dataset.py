@@ -114,17 +114,20 @@ def check_mixed_dataset_and_collate():
 
 def check_build_dataloaders():
     def build_multiserver(**kwargs):
+        assert not kwargs["use_augmentation"]
         split = kwargs["split"]
         return FakeFrameDataset("multiserver", f"multiserver/{split}", [1, 2])
 
     def build_dexycb(**kwargs):
+        assert not kwargs["use_augmentation"]
         split = kwargs["split"]
         return FakeFrameDataset("DexYCB", f"DexYCB/{split}", [1, 2])
 
     args = SimpleNamespace(
         dataset_root="multiserver", dex_ycb_root="dexycb",
         dataset_names=None, test_seq_count=2, image_size=IMAGE_SIZE,
-        clip_length=2, clip_stride=2, batch_size=1, val_batch_size=1,
+        clip_length=2, clip_stride=2, val_clip_stride=2,
+        batch_size=1, val_batch_size=1, disable_augmentation=False,
         num_workers=0, prefetch_factor=2,
     )
 
@@ -144,6 +147,8 @@ def check_build_dataloaders():
             )
             assert len(train_loader.dataset) == expected_clips
             assert len(val_loader.dataset) == expected_clips
+            assert train_loader.dataset.use_augmentation
+            assert not val_loader.dataset.use_augmentation
             assert next(iter(val_loader))["image"].shape == (
                 1,
                 2,
@@ -151,6 +156,15 @@ def check_build_dataloaders():
                 IMAGE_SIZE,
                 IMAGE_SIZE,
             )
+
+        args.dataset_mode = "multiserver"
+        args.disable_augmentation = True
+        train_loader, val_loader = memory_dataset.build_dataloaders(
+            args,
+            torch.device("cpu"),
+        )
+        assert not train_loader.dataset.use_augmentation
+        assert not val_loader.dataset.use_augmentation
 
 
 def check_invalid_sequences_are_filtered_before_split():

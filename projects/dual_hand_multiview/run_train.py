@@ -69,6 +69,7 @@ def parse_args():
 
     # Dataset 与 Clip
     parser.add_argument("--dataset", dest="dataset_mode", choices=("multiserver", "dexycb", "mixed"), default="mixed")
+    parser.add_argument("--disable-augmentation", action="store_true")
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
     parser.add_argument("--test-seq-count", type=int, default=3)

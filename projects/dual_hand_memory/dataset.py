@@ -3,7 +3,12 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-from projects.framewise_sam2_modified.dataset import DexYCBDataset, MultiServerDualHandDataset, CombinedStreamDataset
+from projects.framewise_sam2_modified.dataset import (
+    CombinedStreamDataset,
+    DexYCBDataset,
+    MultiServerDualHandDataset,
+    augment_dual_hand_clip,
+)
 
 FrameDataset = (
     MultiServerDualHandDataset
@@ -17,6 +22,7 @@ class ConsecutiveClipDataset(Dataset):
         frame_dataset: FrameDataset,
         clip_length: int = 2,
         clip_stride: int = 2,
+        use_augmentation: bool = False,
     ):
         """把已有单帧 Dataset 包成 Clip"""
 
@@ -26,6 +32,7 @@ class ConsecutiveClipDataset(Dataset):
             raise ValueError("clip_stride 必须大于 0")
 
         self.frame_dataset = frame_dataset
+        self.use_augmentation = use_augmentation
         self.clips = []
 
         for stream_id, stream in frame_dataset.streams.items():
@@ -66,10 +73,19 @@ class ConsecutiveClipDataset(Dataset):
             for sample_index in clip["sample_indices"]
         ]
 
+        images = torch.stack([frame["image"] for frame in frames])
+        left_masks = torch.stack([frame["left_mask"] for frame in frames])
+        right_masks = torch.stack([frame["right_mask"] for frame in frames])
+
+        if self.use_augmentation:
+            images, left_masks, right_masks = augment_dual_hand_clip(
+                images, left_masks, right_masks
+            )
+
         return {
-            "image": torch.stack([frame["image"] for frame in frames]), # [T,3,H,W] 还没有 Batch collate
-            "left_mask": torch.stack([frame["left_mask"] for frame in frames]),
-            "right_mask": torch.stack([frame["right_mask"] for frame in frames]),
+            "image": images, # [T,3,H,W] 还没有 Batch collate
+            "left_mask": left_masks,
+            "right_mask": right_masks,
 
             "original_size": [frame["original_size"] for frame in frames],
             "original_image": [frame["original_image"] for frame in frames],
@@ -147,11 +163,13 @@ def build_dataloaders(args, device):
         train_frame_dataset,
         clip_length=args.clip_length,
         clip_stride=args.clip_stride,
+        use_augmentation=not args.disable_augmentation,
     )
     val_dataset = ConsecutiveClipDataset(
         val_frame_dataset,
         clip_length=args.clip_length,
         clip_stride=args.val_clip_stride,
+        use_augmentation=False,
     )
 
     if len(train_dataset) == 0:
