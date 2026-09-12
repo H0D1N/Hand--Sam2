@@ -1,8 +1,10 @@
 import copy
-import torch
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Literal
 from functools import partial
+from typing import Literal
+
+import torch
 
 from .sam2_dual_hand_memory import SAM2DualHandMemory
 from sam2.modeling.sam2_utils import get_next_point, sample_box_points
@@ -88,6 +90,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         left_masks,
         right_masks,
         prompt_request,
+        encoder_chunk_size=None,
     ):
         """
         images:      [B,V,T,3,H,W]
@@ -96,6 +99,9 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
 
         prompt_request 见 PromptRequest：
         auto 模式按模型配置随机采样，point/mask 模式完全由请求指定。
+
+        encoder_chunk_size 控制单次送入 Image Encoder 的图像数。
+        None 表示一次编码当前帧的 B*V 张图像。
         """
         if prompt_request.mode not in {"auto", "point", "mask"}:
             raise ValueError(f"不支持的 prompt mode: {prompt_request.mode}")
@@ -103,21 +109,93 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         assert images.dim() == left_masks.dim() == right_masks.dim() == 6
         assert images.shape[:3] == left_masks.shape[:3] == right_masks.shape[:3]
 
-        # [B,V,T,C,H,W] -> [T*B*V,C,H,W]
-        flat_images = images.permute(2, 0, 1, 3, 4, 5).flatten(0, 2)
-
-        # 1. Image Encoder
-        backbone_out = self.forward_image(flat_images)
-
-        # 2. Prompt
+        # 1. Prompt
         prompt_plan = self.prepare_prompt_inputs(
             left_masks=left_masks,
             right_masks=right_masks,
             prompt_request=prompt_request,
         )
 
-        # 3. Tracking
-        return self.forward_tracking(backbone_out, prompt_plan)
+        # 2. 按帧、分块提取图像特征，并立即执行当前帧 Tracking。
+        return self.forward_tracking(
+            images,
+            prompt_plan,
+            encoder_chunk_size=encoder_chunk_size,
+        )
+
+    def _image_feature_modules(self):
+        """返回 forward_image 中实际参与特征提取和投影的模块。"""
+
+        return (
+            self.image_encoder,
+            self.left_mask_decoder.conv_s0,
+            self.left_mask_decoder.conv_s1,
+            self.right_mask_decoder.conv_s0,
+            self.right_mask_decoder.conv_s1,
+        )
+
+    def _encode_image_chunk(self, images):
+        """编码一小批图像，只保留当前帧 Tracking 会使用的特征。"""
+
+        needs_grad = torch.is_grad_enabled() and (
+            images.requires_grad
+            or any(
+                parameter.requires_grad
+                for module in self._image_feature_modules()
+                for parameter in module.parameters()
+            )
+        )
+        context = nullcontext() if needs_grad else torch.no_grad()
+
+        with context:
+            backbone_out = self.forward_image(images)
+            return {
+                "main_feature": backbone_out["backbone_fpn"][-1],
+                "main_pos_embed": backbone_out["vision_pos_enc"][-1],
+                "left_high_res_features": backbone_out["left_high_res_features"],
+                "right_high_res_features": backbone_out["right_high_res_features"],
+            }
+
+    def _encode_frame_views(self, frame_images, encoder_chunk_size=None):
+        """分块编码当前帧的 B*V 张图像，并恢复 Mask Decoder 所需格式。"""
+
+        batch_size, num_views = frame_images.shape[:2]
+        flat_images = frame_images.flatten(0, 1)
+        num_images = batch_size * num_views
+
+        if encoder_chunk_size is None:
+            encoder_chunk_size = num_images
+        if encoder_chunk_size < 1:
+            raise ValueError("encoder_chunk_size 必须大于 0")
+
+        chunks = [
+            self._encode_image_chunk(image_chunk)
+            for image_chunk in flat_images.split(encoder_chunk_size, dim=0)
+        ]
+
+        main_feature_map = torch.cat(
+            [chunk["main_feature"] for chunk in chunks],
+            dim=0,
+        )
+        main_pos_map = torch.cat(
+            [chunk["main_pos_embed"] for chunk in chunks],
+            dim=0,
+        )
+        high_res_features = {
+            hand: [
+                torch.cat(
+                    [chunk[f"{hand}_high_res_features"][level] for chunk in chunks],
+                    dim=0,
+                )
+                for level in range(len(chunks[0][f"{hand}_high_res_features"]))
+            ]
+            for hand in ("left", "right")
+        }
+
+        feature_size = main_feature_map.shape[-2:]
+        main_feature = main_feature_map.flatten(2).permute(2, 0, 1)
+        main_pos_embed = main_pos_map.flatten(2).permute(2, 0, 1)
+        return main_feature, main_pos_embed, feature_size, high_res_features
     
     def prepare_prompt_inputs(
         self,
@@ -326,16 +404,18 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
             add_correction_frames_as_cond=add_correction_frames_as_cond,
         )
     
-    def forward_tracking(self, backbone_out, prompt_plan, return_dict=False):
+    def forward_tracking(
+        self,
+        images,
+        prompt_plan,
+        return_dict=False,
+        encoder_chunk_size=None,
+    ):
         """
         按照 PromptPlan 逐帧跟踪左右手，并分别维护两套 Memory bank。
 
         同一时刻的 B*V 张图像作为当前帧的图像 batch。
         """
-
-        # 0. 准备输入
-        # backbone_fpn & vision_pos_enc are in (HW)NC format
-        _, vision_feats, vision_pos_embeds, feat_sizes = self._prepare_backbone_features(backbone_out)
 
         batch_size = prompt_plan.batch_size
         num_views = prompt_plan.num_views
@@ -359,14 +439,17 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
 
         # 1. 处理输入，按 PromptPlan 指定的顺序逐帧跟踪
         for frame_idx in processing_order:
-            # 1. 从整段视频特征中 [N,T*B*V,C]，取出当前 frame_idx 帧对应的 B*V 张图片特征
-            image_slice = slice(frame_idx * num_images_per_frame, (frame_idx + 1) * num_images_per_frame)
-
-                # 只取 最小的特征
-                # 高分辨率特征只在 mask_decoder 中以 backbone_out[f"{hand}_high_res_features"] 用到
-            main_feature = vision_feats[-1][:, image_slice]
-            main_pos_embed = vision_pos_embeds[-1][:, image_slice]
-            feature_size = feat_sizes[-1]
+            # 1. 当前帧只同时保留 B*V 份精简特征；Image Encoder 可按更小的
+            # chunk 顺序执行，避免一次编码 T*B*V 张完整图像。
+            (
+                main_feature,
+                main_pos_embed,
+                feature_size,
+                high_res_features_by_hand,
+            ) = self._encode_frame_views(
+                images[:, :, frame_idx],
+                encoder_chunk_size=encoder_chunk_size,
+            )
 
             # 2. 取当前帧的 Prompt 和 GT
             frame_gt_masks = prompt_plan.gt_masks_per_frame[frame_idx]
@@ -381,11 +464,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
                 ("left", slice(0, num_images_per_frame)),
                 ("right", slice(num_images_per_frame, 2 * num_images_per_frame)),
             ):
-                # 使用的是image_slice, 从整段视频特征中[T*B*V, C, H, W]，取出当前 frame_idx 帧对应的 B*V 张图片特征
-                high_res_features = [
-                    feature[image_slice]
-                    for feature in backbone_out[f"{hand}_high_res_features"]
-                ]
+                high_res_features = high_res_features_by_hand[hand]
                 # 使用的是hand_slice, 从 [2BV, 1, H, W] 中取出当前 手 对应的 BV 个 Prompt 
                 point_inputs = None if frame_point_inputs is None else {
                     key: value[hand_slice] for key, value in frame_point_inputs.items()

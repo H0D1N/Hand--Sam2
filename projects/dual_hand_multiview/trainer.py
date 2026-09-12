@@ -52,6 +52,7 @@ def run_training_epoch(
                 left_masks=left_masks,
                 right_masks=right_masks,
                 prompt_request=prompt_request,
+                encoder_chunk_size=args.encoder_chunk_size,
             )
             total_loss, loss_details = loss_fn(
                 frame_outputs,
@@ -202,6 +203,7 @@ def run_validation_epoch(
             left_masks=left_masks,
             right_masks=right_masks,
             prompt_request=prompt_request,
+            encoder_chunk_size=args.encoder_chunk_size,
         )
         loss, _ = loss_fn(frame_outputs, left_masks, right_masks)
 
