@@ -28,7 +28,10 @@ MAX_EXPERIMENT_VISUALIZATIONS_PER_DATASET = 10
 def load_model(args, device: torch.device) -> torch.nn.Module:
     """按训练参数重建模型，并加载完整的 Memory checkpoint。"""
 
-    checkpoint = torch.load(args.sam_checkpoint, map_location="cpu", weights_only=False)
+    if args.memory_checkpoint is None:
+        raise ValueError("Memory hardcase 分析需要 --memory-checkpoint")
+
+    checkpoint = torch.load(args.memory_checkpoint, map_location="cpu", weights_only=False)
     saved_args = checkpoint["args"]
     model = build_sam2_dual_hand_memory_tiny(
         sam_checkpoint=saved_args["sam_checkpoint"],
@@ -45,7 +48,7 @@ def load_model(args, device: torch.device) -> torch.nn.Module:
     )
     model.load_state_dict(checkpoint["model_state"], strict=True)
     args.image_size = model.image_size
-    logging.info("Loaded Memory checkpoint | %s | epoch=%s", args.sam_checkpoint, checkpoint.get("epoch", "unknown"))
+    logging.info("Loaded Memory checkpoint | %s | epoch=%s", args.memory_checkpoint, checkpoint.get("epoch", "unknown"))
     return model.eval()
 
 
@@ -496,7 +499,7 @@ def run_analysis(model: torch.nn.Module, loader, device: torch.device, args) -> 
             )
 
     dump_json({
-        "dataset": args.dataset_mode, "model_checkpoint": str(args.sam_checkpoint),
+        "dataset": args.dataset_mode, "memory_checkpoint": str(args.memory_checkpoint),
         "clip_length": args.clip_length, "frame_cases": frame_cases, "temporal_cases": temporal_cases,
     }, args.output_dir / "hardcases.json")
     dump_json(_summary(stats), args.output_dir / "summary.json")

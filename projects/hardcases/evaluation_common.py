@@ -1,4 +1,4 @@
-"""Framewise 与 Memory zero-shot 共用的数据参数和验证 Clip。"""
+"""Framewise、Memory 与 MultiView 共用的数据参数和验证 Clip。"""
 
 import argparse
 from pathlib import Path
@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from projects.dual_hand_memory.dataset import ConsecutiveClipDataset, collate_clip_batch
+from projects.dual_hand_multiview.dataset import MultiViewConsecutiveClipDataset, collate_multiview_clip_batch
 from projects.framewise_sam2_modified.dataset import DexYCBDataset, MultiServerDualHandDataset, CombinedStreamDataset
 
 
@@ -34,28 +35,46 @@ def add_dataset_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     group.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
     group.add_argument("--test-seq-count", type=int, default=3)
     group.add_argument("--dex-ycb-root", type=Path)
+    group.add_argument(
+        "--num-views",
+        type=int,
+        default=2,
+        help="MultiView 每个 Clip 中对齐的视角数",
+    )
 
     return parser
 
 def add_runtime_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    group = parser.add_argument_group("Other public args")
+    group = parser.add_argument_group("Runtime")
 
     group.add_argument("--output-dir", type=Path, required=True)
     group.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     group.add_argument("--seed", type=int, default=42)
     group.add_argument("--disable-tf32", action="store_true")
     group.add_argument("--image-size", type=int, default=768)
+    group.add_argument(
+        "--views-per-encode",
+        type=int,
+        default=1,
+        help="MultiView 每次送入 Image Encoder 的视角数",
+    )
+    group.add_argument("--channels-last", action="store_true")
 
     return parser
 
 def add_model_arguments(parser):
-    source = parser.add_mutually_exclusive_group()
+    checkpoint = parser.add_argument_group("Checkpoint")
+    source = checkpoint.add_mutually_exclusive_group()
     source.add_argument("--sam-checkpoint", type=Path)
     source.add_argument("--framewise-checkpoint", type=Path)
-    source.add_argument("--model-checkpoint", type=Path)
+    source.add_argument("--memory-checkpoint", type=Path)
+    source.add_argument("--multiview-checkpoint", type=Path)
 
-    # Framewise 运行设置
-    parser.add_argument("--channels-last", action="store_true")
+    # MultiView 从 SAM / Memory 权重初始化时所需的结构参数。
+    structure = parser.add_argument_group("MultiView model structure")
+    structure.add_argument("--num-latents", type=int, default=144)
+    structure.add_argument("--num-aggregator-layers", type=int, default=2)
+    structure.add_argument("--num-distributor-layers", type=int, default=1)
     return parser
 
 def add_loss_arguments(parser):
@@ -90,8 +109,10 @@ def add_evaluation_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     return parser
 
 def parse_args() -> argparse.Namespace:
-    """解析两种模型共用的验证数据与运行参数。"""
-    parser = argparse.ArgumentParser(description="Evaluate Framewise or Memory models on shared validation clips.")
+    """解析三种模型共用的验证数据与运行参数。"""
+    parser = argparse.ArgumentParser(
+        description="Evaluate Framewise, Memory, or MultiView models on shared validation clips."
+    )
 
     add_runtime_arguments(parser)
     add_model_arguments(parser)
@@ -108,14 +129,31 @@ def parse_args() -> argparse.Namespace:
     if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
         parser.error("--dataset dexycb/mixed 需要提供 --dex-ycb-root")
 
-    if args.sam_checkpoint is None and args.model_checkpoint is None and args.framewise_checkpoint is None:
+    if all(
+        checkpoint is None
+        for checkpoint in (
+            args.sam_checkpoint,
+            args.framewise_checkpoint,
+            args.memory_checkpoint,
+            args.multiview_checkpoint,
+        )
+    ):
         args.sam_checkpoint = DEFAULT_SAM_CHECKPOINT
 
-    if args.clip_length < 1:
-        parser.error("--clip-length 必须大于 0")
+    if args.clip_length < 2:
+        parser.error("--clip-length 必须至少为 2")
 
     if args.val_clip_stride < args.clip_length:
         parser.error("--val-clip-stride 不能小于 --clip-length")
+
+    if args.num_views < 2:
+        parser.error("--num-views 必须至少为 2")
+
+    if args.views_per_encode < 1:
+        parser.error("--views-per-encode 必须大于 0")
+
+    if args.num_latents < 1 or args.num_aggregator_layers < 1 or args.num_distributor_layers < 1:
+        parser.error("MultiView 结构参数必须大于 0")
 
     if args.num_correction_pt_per_frame < 0:
         parser.error("--num-correction-pt-per-frame 不能小于 0")
@@ -138,8 +176,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def build_zero_shot_loader(args: argparse.Namespace, device: torch.device, collate_fn=collate_clip_batch) -> DataLoader:
-    """只加载共享的验证集，保证两种模型评测完全相同的连续帧。"""
+def _build_validation_frame_dataset(args: argparse.Namespace):
     frame_datasets = []
     if args.dataset_mode in {"multiserver", "mixed"}:
         frame_datasets.append(MultiServerDualHandDataset(
@@ -152,11 +189,10 @@ def build_zero_shot_loader(args: argparse.Namespace, device: torch.device, colla
             image_size=args.image_size, use_augmentation=False,
         ))
 
-    frame_dataset = CombinedStreamDataset(frame_datasets) if args.dataset_mode == "mixed" else frame_datasets[0]
-    dataset = ConsecutiveClipDataset(frame_dataset, clip_length=args.clip_length, clip_stride=args.val_clip_stride)
-    if len(dataset) == 0:
-        raise ValueError("验证集没有生成任何连续 Clip")
+    return CombinedStreamDataset(frame_datasets) if len(frame_datasets) > 1 else frame_datasets[0]
 
+
+def _build_validation_loader(args, device, dataset, collate_fn):
     loader_kwargs = {
         "batch_size": args.val_batch_size, "shuffle": False, "drop_last": False,
         "num_workers": args.num_workers, "pin_memory": device.type == "cuda",
@@ -165,3 +201,34 @@ def build_zero_shot_loader(args: argparse.Namespace, device: torch.device, colla
     if args.num_workers > 0:
         loader_kwargs.update({"persistent_workers": True, "prefetch_factor": args.prefetch_factor})
     return DataLoader(dataset, **loader_kwargs)
+
+
+def build_zero_shot_loader(args: argparse.Namespace, device: torch.device, collate_fn=collate_clip_batch) -> DataLoader:
+    """加载共享验证集中的单视角连续 Clip。"""
+    dataset = ConsecutiveClipDataset(
+        _build_validation_frame_dataset(args),
+        clip_length=args.clip_length,
+        clip_stride=args.val_clip_stride,
+    )
+    if len(dataset) == 0:
+        raise ValueError("验证集没有生成任何连续 Clip")
+    return _build_validation_loader(args, device, dataset, collate_fn)
+
+
+def build_multiview_zero_shot_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
+    """加载共享验证集中对齐的多视角连续 Clip。"""
+    dataset = MultiViewConsecutiveClipDataset(
+        _build_validation_frame_dataset(args),
+        num_views=args.num_views,
+        clip_length=args.clip_length,
+        clip_stride=args.val_clip_stride,
+        use_augmentation=False,
+    )
+    if len(dataset) == 0:
+        raise ValueError("验证集没有生成多视角连续 Clip")
+    return _build_validation_loader(
+        args,
+        device,
+        dataset,
+        collate_multiview_clip_batch,
+    )

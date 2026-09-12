@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--sam-checkpoint", type=Path, default=REPO_ROOT / "checkpoints/sam2.1_hiera_tiny.pt")
-    parser.add_argument("--model-checkpoint", type=Path)
+    parser.add_argument("--framewise-checkpoint", type=Path)
     parser.add_argument("--multimask-output", action="store_true")
     parser.add_argument("--use-image-adapter", action="store_true")
     parser.add_argument("--use-decoder-adapter", action="store_true")
@@ -148,10 +148,10 @@ def build_validation_loader(args: argparse.Namespace, device: torch.device) -> D
 
 def load_model(args: argparse.Namespace) -> torch.nn.Module:
     checkpoint = None
-    if args.model_checkpoint is not None:
-        if not args.model_checkpoint.is_file():
-            raise FileNotFoundError(f"训练 checkpoint 不存在: {args.model_checkpoint}")
-        checkpoint = torch.load(args.model_checkpoint, map_location="cpu", weights_only=False)
+    if args.framewise_checkpoint is not None:
+        if not args.framewise_checkpoint.is_file():
+            raise FileNotFoundError(f"训练 checkpoint 不存在: {args.framewise_checkpoint}")
+        checkpoint = torch.load(args.framewise_checkpoint, map_location="cpu", weights_only=False)
         if "model_state" not in checkpoint:
             raise KeyError("训练 checkpoint 中不存在 model_state")
         saved_args = checkpoint.get("args", {})
@@ -172,7 +172,7 @@ def load_model(args: argparse.Namespace) -> torch.nn.Module:
         if not any(k.startswith("right_mask_decoder.") for k in state):
             raise KeyError("训练 checkpoint 缺少 right_mask_decoder")
         model.load_state_dict(state, strict=True)
-        logging.info("Loaded dual-decoder checkpoint: %s", args.model_checkpoint)
+        logging.info("Loaded dual-decoder checkpoint: %s", args.framewise_checkpoint)
 
     if args.channels_last and torch.device(args.device).type == "cuda":
         model = model.to(memory_format=torch.channels_last)
@@ -287,7 +287,7 @@ def run_analysis(model: torch.nn.Module, loader: DataLoader, device: torch.devic
     dump_json({
         "dataset": args.dataset,
         "use_point_prompt": args.use_point_prompt,
-        "model_checkpoint": str(args.model_checkpoint) if args.model_checkpoint else None,
+        "framewise_checkpoint": str(args.framewise_checkpoint) if args.framewise_checkpoint else None,
         "frame_cases": frame_cases,
         "temporal_cases": temporal_cases,
     }, args.output_dir / "hardcases.json")

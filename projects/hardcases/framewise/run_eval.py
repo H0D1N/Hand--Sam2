@@ -1,15 +1,55 @@
-"""Evaluate the unfinetuned dual-decoder structure on the validation split."""
+"""Evaluate an initialized or trained Framewise dual-decoder model."""
 
 import logging
 
 import torch
 
-from ...framewise_sam2_modified.builder import build_sam2_modified_tiny
+from ...framewise_sam2_modified.builder import (
+    build_sam2_modified_tiny,
+    create_sam2_modified_tiny,
+    inject_sam2_modified_adapters,
+)
 from ...framewise_sam2_modified.dataset import build_center_point_prompt
 from ...framewise_sam2_modified.trainer import run_validation_epoch
 from ...framewise_sam2_modified.utils import configure_runtime, dump_json, set_seed
 from projects.dual_hand_memory.dataset import collate_clip_batch
 from projects.hardcases.evaluation_common import build_zero_shot_loader, parse_args
+
+
+ADAPTER_DEFAULTS = {
+    "use_image_adapter": False,
+    "use_decoder_adapter": False,
+    "adapter_dim": 64,
+    "adapter_dropout": 0.1,
+    "adapter_init_scale": 1e-3,
+}
+
+
+def load_framewise_checkpoint(checkpoint_path, device):
+    """从完整训练 checkpoint 重建 Framewise 模型。"""
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Framewise checkpoint 不存在: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if "args" not in checkpoint or "model_state" not in checkpoint:
+        raise ValueError("Framewise 评测需要包含 args 和 model_state 的训练 checkpoint")
+
+    saved_args = checkpoint["args"]
+    model = create_sam2_modified_tiny(image_size=saved_args["image_size"])
+    inject_sam2_modified_adapters(
+        model=model,
+        **{
+            key: saved_args.get(key, default)
+            for key, default in ADAPTER_DEFAULTS.items()
+        },
+    )
+    model.load_state_dict(checkpoint["model_state"], strict=True)
+    logging.info(
+        "Loaded Framewise checkpoint | %s | epoch=%s",
+        checkpoint_path,
+        checkpoint.get("epoch", "unknown"),
+    )
+    return model.to(device).eval()
 
 
 def collate_tracking_frames(items):
@@ -29,6 +69,13 @@ def collate_tracking_frames(items):
 
 def main() -> None:
     args = parse_args()
+
+    if args.memory_checkpoint is not None or args.multiview_checkpoint is not None:
+        raise ValueError(
+            "Framewise 只能从 --sam-checkpoint 或完整的 "
+            "--framewise-checkpoint 加载"
+        )
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -43,12 +90,20 @@ def main() -> None:
         channels_last=args.channels_last,
     )
 
-    val_loader = build_zero_shot_loader(args, device, collate_fn=collate_tracking_frames)
+    if args.framewise_checkpoint is not None:
+        model = load_framewise_checkpoint(args.framewise_checkpoint, device)
+    else:
+        # 官方 SAM2 权重复制为左右 Decoder；zero-shot 不注入未训练的 Adapter。
+        model = build_sam2_modified_tiny(
+            checkpoint_path=args.sam_checkpoint, device=args.device,
+            mode="eval", image_size=args.image_size,
+        )
 
-    # 官方 SAM2 权重复制为左右 Decoder；zero-shot 不注入未训练的 Adapter。
-    model = build_sam2_modified_tiny(
-        checkpoint_path=args.sam_checkpoint, device=args.device,
-        mode="eval", image_size=args.image_size,
+    args.image_size = model.image_size
+    val_loader = build_zero_shot_loader(
+        args,
+        device,
+        collate_fn=collate_tracking_frames,
     )
 
     if args.channels_last and device.type == "cuda":
@@ -81,7 +136,7 @@ def main() -> None:
     )
 
     logging.info(
-        "ZERO-SHOT BASELINE COMPLETE | "
+        "FRAMEWISE EVALUATION COMPLETE | "
         "val_loss=%.4f | val_iou=%.4f | val_dice=%.4f | "
         "obj_acc=%.4f | obj_precision=%.4f | "
         "obj_recall=%.4f | obj_f1=%.4f",

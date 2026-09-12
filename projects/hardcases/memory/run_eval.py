@@ -18,6 +18,12 @@ from projects.hardcases.evaluation_common import build_zero_shot_loader, parse_a
 def main() -> None:
     args = parse_args()
 
+    if args.multiview_checkpoint is not None:
+        raise ValueError(
+            "Memory 只能从 --sam-checkpoint、--framewise-checkpoint "
+            "或完整的 --memory-checkpoint 加载"
+        )
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -28,8 +34,8 @@ def main() -> None:
     device = torch.device(args.device)
     configure_runtime(device, use_tf32=not args.disable_tf32)
 
-    if args.model_checkpoint is not None:
-        model = load_sam2_dual_hand_memory_tiny(args.model_checkpoint, device=device)
+    if args.memory_checkpoint is not None:
+        model = load_sam2_dual_hand_memory_tiny(args.memory_checkpoint, device=device)
     else:
         model = build_sam2_dual_hand_memory_tiny(
             sam_checkpoint=args.sam_checkpoint,
