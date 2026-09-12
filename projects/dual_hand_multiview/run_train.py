@@ -78,10 +78,10 @@ def parse_args():
     parser.add_argument("--clip-stride", type=int, default=80)
     parser.add_argument("--val-clip-stride", type=int, default=8)
     parser.add_argument(
-        "--encoder-chunk-size",
+        "--views-per-encode",
         type=int,
         default=1,
-        help="每次送入 Image Encoder 的图像数；多视角仍在特征层同时融合",
+        help="每次送入 Image Encoder 的视角数；多视角仍在特征层同时融合",
     )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--val-batch-size", type=int, default=1)
@@ -125,8 +125,8 @@ def parse_args():
             parser.error("Prompt 或纠错帧下标超出有效范围")
     if not 1 <= args.num_init_cond_frames_for_train <= args.num_frames_to_correct_for_train <= args.clip_length:
         parser.error("必须满足 1 <= 初始条件帧数 <= 纠错帧数 <= clip-length")
-    if args.encoder_chunk_size < 1:
-        parser.error("--encoder-chunk-size 必须大于 0")
+    if args.views_per_encode < 1:
+        parser.error("--views-per-encode 必须大于 0")
     return args
 
 

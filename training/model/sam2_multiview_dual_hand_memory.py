@@ -90,7 +90,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         left_masks,
         right_masks,
         prompt_request,
-        encoder_chunk_size=None,
+        views_per_encode=None,
     ):
         """
         images:      [B,V,T,3,H,W]
@@ -100,8 +100,8 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         prompt_request 见 PromptRequest：
         auto 模式按模型配置随机采样，point/mask 模式完全由请求指定。
 
-        encoder_chunk_size 控制单次送入 Image Encoder 的图像数。
-        None 表示一次编码当前帧的 B*V 张图像。
+        views_per_encode 控制单次送入 Image Encoder 的视角数。
+        None 表示一次编码当前帧的全部 V 个视角。
         """
         if prompt_request.mode not in {"auto", "point", "mask"}:
             raise ValueError(f"不支持的 prompt mode: {prompt_request.mode}")
@@ -120,7 +120,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         return self.forward_tracking(
             images,
             prompt_plan,
-            encoder_chunk_size=encoder_chunk_size,
+            views_per_encode=views_per_encode,
         )
 
     def _image_feature_modules(self):
@@ -156,38 +156,43 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
                 "right_high_res_features": backbone_out["right_high_res_features"],
             }
 
-    def _encode_frame_views(self, frame_images, encoder_chunk_size=None):
-        """分块编码当前帧的 B*V 张图像，并恢复 Mask Decoder 所需格式。"""
+    def _encode_frame_views(self, frame_images, views_per_encode=None):
+        """沿 V 维分块编码当前帧，并恢复 Mask Decoder 所需格式。"""
 
         batch_size, num_views = frame_images.shape[:2]
-        flat_images = frame_images.flatten(0, 1)
-        num_images = batch_size * num_views
 
-        if encoder_chunk_size is None:
-            encoder_chunk_size = num_images
-        if encoder_chunk_size < 1:
-            raise ValueError("encoder_chunk_size 必须大于 0")
+        if views_per_encode is None:
+            views_per_encode = num_views
+        if views_per_encode < 1:
+            raise ValueError("views_per_encode 必须大于 0")
 
-        chunks = [
-            self._encode_image_chunk(image_chunk)
-            for image_chunk in flat_images.split(encoder_chunk_size, dim=0)
-        ]
+        chunks = []
+        for view_chunk in frame_images.split(views_per_encode, dim=1):
+            encoded = self._encode_image_chunk(view_chunk.flatten(0, 1))
+            chunks.append((view_chunk.size(1), encoded))
 
-        main_feature_map = torch.cat(
-            [chunk["main_feature"] for chunk in chunks],
-            dim=0,
-        )
-        main_pos_map = torch.cat(
-            [chunk["main_pos_embed"] for chunk in chunks],
-            dim=0,
-        )
+        def merge_view_chunks(key):
+            restored = [
+                chunk[key].unflatten(0, (batch_size, chunk_num_views))
+                for chunk_num_views, chunk in chunks
+            ]
+            return torch.cat(restored, dim=1).flatten(0, 1)
+
+        main_feature_map = merge_view_chunks("main_feature")
+        main_pos_map = merge_view_chunks("main_pos_embed")
         high_res_features = {
             hand: [
                 torch.cat(
-                    [chunk[f"{hand}_high_res_features"][level] for chunk in chunks],
-                    dim=0,
-                )
-                for level in range(len(chunks[0][f"{hand}_high_res_features"]))
+                    [
+                        chunk[f"{hand}_high_res_features"][level].unflatten(
+                            0,
+                            (batch_size, chunk_num_views),
+                        )
+                        for chunk_num_views, chunk in chunks
+                    ],
+                    dim=1,
+                ).flatten(0, 1)
+                for level in range(len(chunks[0][1][f"{hand}_high_res_features"]))
             ]
             for hand in ("left", "right")
         }
@@ -409,7 +414,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         images,
         prompt_plan,
         return_dict=False,
-        encoder_chunk_size=None,
+        views_per_encode=None,
     ):
         """
         按照 PromptPlan 逐帧跟踪左右手，并分别维护两套 Memory bank。
@@ -448,7 +453,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
                 high_res_features_by_hand,
             ) = self._encode_frame_views(
                 images[:, :, frame_idx],
-                encoder_chunk_size=encoder_chunk_size,
+                views_per_encode=views_per_encode,
             )
 
             # 2. 取当前帧的 Prompt 和 GT
