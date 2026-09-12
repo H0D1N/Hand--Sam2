@@ -91,6 +91,8 @@ class FakeMemoryModel(nn.Module):
         **kwargs,
     ):
         corrected = frame_idx in frames_to_add_correction_pt
+        if corrected:
+            assert gt_masks.dtype == torch.bool
         self.calls.append({
             "hand": hand,
             "frame_idx": frame_idx,
@@ -100,11 +102,11 @@ class FakeMemoryModel(nn.Module):
             "num_views": kwargs.get("num_views"),
         })
         if mask_inputs is not None or corrected:
-            logits = gt_masks * 20.0 - 10.0
+            logits = gt_masks.float() * 20.0 - 10.0
         else:
-            logits = torch.full_like(gt_masks, -10.0)
+            logits = torch.full_like(gt_masks, -10.0, dtype=torch.float32)
             if logits.shape[0] > 1:
-                logits[0] = gt_masks[0] * 20.0 - 10.0
+                logits[0] = gt_masks[0].float() * 20.0 - 10.0
         return {
             "pred_masks_high_res": logits,
             "maskmem_features": torch.zeros(gt_masks.shape[0], 1, 1, 1),

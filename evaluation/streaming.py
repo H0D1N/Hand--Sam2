@@ -166,7 +166,10 @@ class LongVideoEvaluator:
             track_in_reverse=False,
             run_mem_encoder=run_mem_encoder,
             frames_to_add_correction_pt=[frame_index] if correct else [],
-            gt_masks=gt_masks,
+            # SAM2 的误差点采样使用按位逻辑，要求 GT 为 bool。
+            # 训练路径会在 prepare_prompt_inputs 中转换；流式评估绕过了
+            # 该函数，因此需要在 track_step 边界保持相同约定。
+            gt_masks=gt_masks.bool(),
             **kwargs,
         )
 
