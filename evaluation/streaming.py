@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import torch
 import torch.nn.functional as F
@@ -97,7 +98,15 @@ def _prune_memory_bank(model, bank: dict, next_frame: int, num_frames: int) -> N
 
 
 class LongVideoEvaluator:
-    def __init__(self, model, model_type: str, device, policy: EvaluationPolicy, amp=False):
+    def __init__(
+        self,
+        model,
+        model_type: str,
+        device,
+        policy: EvaluationPolicy,
+        amp=False,
+        log_interval=50,
+    ):
         if model_type not in {"memory", "multiview"}:
             raise ValueError(f"未知 model_type: {model_type}")
         self.model = model
@@ -105,6 +114,7 @@ class LongVideoEvaluator:
         self.device = torch.device(device)
         self.policy = policy
         self.amp = bool(amp and self.device.type == "cuda")
+        self.log_interval = max(int(log_interval), 1)
         self.model.max_cond_frames_in_attn = policy.max_condition_frames
         if model_type == "memory":
             self.model.num_correction_pt_per_frame = policy.correction_points
@@ -321,5 +331,17 @@ class LongVideoEvaluator:
                 )
 
             del frame, images, gt_masks_by_hand, backbone_out, vision_feats, vision_pos
+
+            if (
+                (frame_index + 1) % self.log_interval == 0
+                or frame_index + 1 == sequence.num_frames
+            ):
+                logging.info(
+                    "%s | %s | %d/%d frames",
+                    self.policy.configuration,
+                    sequence.evaluation_id,
+                    frame_index + 1,
+                    sequence.num_frames,
+                )
 
         return rows

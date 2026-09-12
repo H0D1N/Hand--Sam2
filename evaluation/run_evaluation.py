@@ -273,7 +273,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--metric-start-frame", type=int, default=1)
     parser.add_argument("--max-sequences", type=int)
-    parser.add_argument("--log-interval", type=int, default=50)
+    parser.add_argument(
+        "--log-interval",
+        type=int,
+        default=50,
+        help="每处理多少帧输出一次进度",
+    )
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--disable-tf32", action="store_true")
@@ -364,6 +369,7 @@ def main() -> None:
                 device=device,
                 policy=policy,
                 amp=args.amp,
+                log_interval=args.log_interval,
             )
             strategy_metrics = MetricAccumulator(args.metric_start_frame)
             strategy_sequences = {}
@@ -381,16 +387,15 @@ def main() -> None:
                     ).update(row)
                 strategy_sequences[sequence.evaluation_id] = sequence_metrics.result()
 
-                if sequence_index % args.log_interval == 0 or sequence_index == len(sequences):
-                    logging.info(
-                        "%s | sequence %d/%d | %s | frames=%d | mean_iou=%.4f",
-                        policy.configuration,
-                        sequence_index,
-                        len(sequences),
-                        sequence.evaluation_id,
-                        sequence.num_frames,
-                        sequence_metrics.result()["mean_iou_after"] or 0.0,
-                    )
+                logging.info(
+                    "%s | sequence %d/%d complete | %s | frames=%d | mean_iou=%.4f",
+                    policy.configuration,
+                    sequence_index,
+                    len(sequences),
+                    sequence.evaluation_id,
+                    sequence.num_frames,
+                    sequence_metrics.result()["mean_iou_after"] or 0.0,
+                )
                 if device.type == "cuda":
                     torch.cuda.empty_cache()
 
