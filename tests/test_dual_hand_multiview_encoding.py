@@ -110,10 +110,35 @@ def check_invalid_views_per_encode():
         raise AssertionError("views_per_encode=0 应该报错")
 
 
+class FailIfCalled(nn.Module):
+    def forward(self, *args, **kwargs):
+        raise AssertionError("关闭融合时不应调用多视角模块")
+
+
+def check_disabled_multiview_fusion_is_identity():
+    model = FakeChunkedEncoder()
+    model.set_multiview_fusion_enabled(False)
+    pix_feat = torch.randn(2, 1, 2, 2)
+    pos_embed = torch.randn(4, 2, 1)
+
+    fused = model._fuse_multiview_features(
+        pix_feat=pix_feat,
+        pos_embed=pos_embed,
+        multiview_aggregator=FailIfCalled(),
+        multiview_distributor=FailIfCalled(),
+        batch_size=1,
+        num_views=2,
+        feature_size=(2, 2),
+    )
+
+    assert fused is pix_feat
+
+
 def main():
     check_chunked_encoding_preserves_batch_view_order()
     check_encoding_keeps_only_required_gradients()
     check_invalid_views_per_encode()
+    check_disabled_multiview_fusion_is_identity()
     print("Dual-hand multiview chunked encoding: OK")
 
 

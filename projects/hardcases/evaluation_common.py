@@ -62,7 +62,7 @@ def add_runtime_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentP
 
     return parser
 
-def add_model_arguments(parser):
+def add_model_arguments(parser, include_multiview_ablation=False):
     checkpoint = parser.add_argument_group("Checkpoint")
     source = checkpoint.add_mutually_exclusive_group()
     source.add_argument("--sam-checkpoint", type=Path)
@@ -75,6 +75,12 @@ def add_model_arguments(parser):
     structure.add_argument("--num-latents", type=int, default=144)
     structure.add_argument("--num-aggregator-layers", type=int, default=2)
     structure.add_argument("--num-distributor-layers", type=int, default=1)
+    if include_multiview_ablation:
+        structure.add_argument(
+            "--disable-multiview-fusion",
+            action="store_true",
+            help="旁路 Aggregator/Distributor，评测同一 checkpoint 的非融合输出",
+        )
     return parser
 
 def add_loss_arguments(parser):
@@ -108,14 +114,17 @@ def add_evaluation_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     group.add_argument("--multimask-output", action=argparse.BooleanOptionalAction, default=False)
     return parser
 
-def parse_args() -> argparse.Namespace:
+def parse_args(include_multiview_ablation=False) -> argparse.Namespace:
     """解析三种模型共用的验证数据与运行参数。"""
     parser = argparse.ArgumentParser(
         description="Evaluate Framewise, Memory, or MultiView models on shared validation clips."
     )
 
     add_runtime_arguments(parser)
-    add_model_arguments(parser)
+    add_model_arguments(
+        parser,
+        include_multiview_ablation=include_multiview_ablation,
+    )
     add_dataset_arguments(parser)
     add_dataloader_arguments(parser)
     add_loss_arguments(parser)

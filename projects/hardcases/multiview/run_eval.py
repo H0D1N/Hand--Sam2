@@ -29,7 +29,7 @@ def build_prompt_request(args) -> PromptRequest:
 
 
 def main() -> None:
-    args = parse_args()
+    args = parse_args(include_multiview_ablation=True)
     if args.prompt_mode is None:
         args.prompt_mode = "auto"
 
@@ -66,6 +66,18 @@ def main() -> None:
             num_correction_pt_per_frame=args.num_correction_pt_per_frame,
             add_all_frames_to_correct_as_cond=args.add_all_frames_to_correct_as_cond,
         )
+
+    model.set_multiview_fusion_enabled(not args.disable_multiview_fusion)
+    residual_scales = {
+        name: parameter.detach().float().item()
+        for name, parameter in model.named_parameters()
+        if name.endswith("residual_scale")
+    }
+    logging.info(
+        "Multiview fusion | enabled=%s | residual_scales=%s",
+        not args.disable_multiview_fusion,
+        residual_scales,
+    )
 
     # 数据缩放必须使用 checkpoint 重建出的模型尺寸。
     args.image_size = model.image_size

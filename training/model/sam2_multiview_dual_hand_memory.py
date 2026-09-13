@@ -80,9 +80,15 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
 
         self.left_multiview_distributor = copy.deepcopy(multiview_distributor)
         self.right_multiview_distributor = copy.deepcopy(multiview_distributor)
+        self.multiview_fusion_enabled = True
 
         del multiview_aggregator
         del multiview_distributor
+
+    def set_multiview_fusion_enabled(self, enabled: bool) -> None:
+        """启用或旁路多视角特征融合。"""
+
+        self.multiview_fusion_enabled = bool(enabled)
 
     def forward(
         self,
@@ -831,6 +837,9 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         feature_size,           # (H, W)
     ):
         """打包 BVNC、聚合共享 token、分发回各视角、解包回解码器输入格式。"""
+        if not self.multiview_fusion_enabled:
+            return pix_feat
+
         B, V = batch_size, num_views
         H, W = feature_size
         N = H * W
