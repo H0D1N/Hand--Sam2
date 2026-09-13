@@ -96,7 +96,7 @@ def add_loss_arguments(parser):
 
 def add_prompt_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     group = parser.add_argument_group("Prompt")
-    group.add_argument("--prompt-mode", choices=("auto", "point", "mask"), default="point")
+    group.add_argument("--prompt-mode",choices=("auto", "point", "mask"), help="默认：Framewise 使用 point，Memory/MultiView 使用 auto",)
     group.add_argument("--correction-frame-indices", type=int, nargs="*", default=[])
     group.add_argument("--num-correction-pt-per-frame", type=int, default=0)
     group.add_argument("--add-all-frames-to-correct-as-cond", action=argparse.BooleanOptionalAction, default=True)

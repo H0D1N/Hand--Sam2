@@ -17,6 +17,8 @@ from projects.hardcases.evaluation_common import build_zero_shot_loader, parse_a
 
 def main() -> None:
     args = parse_args()
+    if args.prompt_mode is None:
+        args.prompt_mode = "auto"
 
     if args.multiview_checkpoint is not None:
         raise ValueError(

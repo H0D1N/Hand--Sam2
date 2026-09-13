@@ -69,6 +69,8 @@ def collate_tracking_frames(items):
 
 def main() -> None:
     args = parse_args()
+    if args.prompt_mode is None:
+        args.prompt_mode = "point"
 
     if args.memory_checkpoint is not None or args.multiview_checkpoint is not None:
         raise ValueError(

@@ -30,6 +30,8 @@ def build_prompt_request(args) -> PromptRequest:
 
 def main() -> None:
     args = parse_args()
+    if args.prompt_mode is None:
+        args.prompt_mode = "auto"
 
     if args.framewise_checkpoint is not None:
         raise ValueError(
