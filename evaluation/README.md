@@ -20,12 +20,13 @@ and `adaptive` are evaluated as separate trajectories rather than being mixed in
 one run.
 
 The default command evaluates `baseline` only. Select the other strategies and
-provide multiple parameter values to generate separate curve series:
+provide multiple parameter values to generate separate curve series. For a dense
+saturation curve, a useful sweep is:
 
 ```bash
 --strategies baseline fixed adaptive \
---fixed-intervals 20 40 80 160 \
---adaptive-thresholds 0.3 0.5 0.7
+--fixed-intervals 10 20 30 40 50 60 80 100 120 160 \
+--adaptive-thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9
 ```
 
 This produces configurations such as `fixed_interval_40` and
@@ -82,3 +83,18 @@ The command writes:
 
 Frame 0 remains in the per-frame and temporal files, while aggregate configuration
 metrics exclude it by default (`--metric-start-frame 1`) because it is prompted.
+
+## Plotting
+
+Generate zoomed budget and temporal plots with the parameter and IoU written next
+to every budget point:
+
+```bash
+python3 -m evaluation.plot_evaluation \
+  --result-dir outputs/evaluation/memory
+```
+
+The script writes PNG versions of `budget_fixed`, `budget_adaptive`,
+`temporal_fixed`, and `temporal_adaptive`. The IoU range is selected
+automatically from the plotted values, with axis limits and major ticks rounded
+to multiples of `0.05`.

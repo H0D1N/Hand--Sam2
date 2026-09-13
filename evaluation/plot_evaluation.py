@@ -1,97 +1,227 @@
+import argparse
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter, MultipleLocator
 import pandas as pd
 
 
-result_dir = Path(
-    "/home/xwx/Hand--Sam2/outputs/memory/baseline_stride80/evaluation"
-)
-temporal = pd.read_csv(result_dir / "temporal_metrics.csv")
-summary = pd.read_csv(result_dir / "configuration_summary.csv")
-
-# 防止视频尾部样本太少。
-temporal = temporal[temporal["sequence_coverage"] >= 0.5]
+SUMMARY_FILENAME = "configuration_summary.csv"
+TEMPORAL_FILENAME = "temporal_metrics.csv"
+IOU_TICK_STEP = 0.05
+IOU_PADDING = 0.01
 
 
-def plot_temporal(strategies, filename, title):
-    data = temporal[temporal["strategy"].isin(strategies)]
+def parse_args():
+    parser = argparse.ArgumentParser(description="Plot long-video evaluation curves")
+    parser.add_argument(
+        "--result-dir",
+        type=Path,
+        required=True,
+        help="Evaluation output directory",
+    )
+    parser.add_argument(
+        "--min-sequence-coverage",
+        type=float,
+        default=0.5,
+        help="Minimum sequence coverage retained in temporal plots",
+    )
+    parser.add_argument("--dpi", type=int, default=200)
+    return parser.parse_args()
 
-    fig, ax = plt.subplots(figsize=(11, 6))
+
+def load_results(result_dir):
+    summary_path = result_dir / SUMMARY_FILENAME
+    temporal_path = result_dir / TEMPORAL_FILENAME
+    if not summary_path.is_file():
+        raise FileNotFoundError(summary_path)
+    if not temporal_path.is_file():
+        raise FileNotFoundError(temporal_path)
+    return pd.read_csv(summary_path), pd.read_csv(temporal_path)
+
+
+def set_iou_axis(ax, values):
+    values = pd.Series(values).dropna()
+    if values.empty:
+        lower, upper = 0.0, 1.0
+    else:
+        lower = (
+            math.floor((float(values.min()) - IOU_PADDING) / IOU_TICK_STEP)
+            * IOU_TICK_STEP
+        )
+        upper = (
+            math.ceil((float(values.max()) + IOU_PADDING) / IOU_TICK_STEP)
+            * IOU_TICK_STEP
+        )
+        lower = max(0.0, lower)
+        upper = min(1.0, upper)
+        if upper <= lower:
+            lower = max(0.0, lower - IOU_TICK_STEP)
+            upper = min(1.0, upper + IOU_TICK_STEP)
+
+    ax.set_ylim(lower, upper)
+    ax.yaxis.set_major_locator(MultipleLocator(IOU_TICK_STEP))
+    ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+    ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+    ax.grid(which="major", alpha=0.35)
+    ax.grid(which="minor", alpha=0.15, linestyle=":")
+
+
+def save_figure(fig, output_dir, stem, dpi):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_dir / f"{stem}.png", dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_temporal(
+    temporal,
+    strategies,
+    output_dir,
+    stem,
+    title,
+    min_sequence_coverage,
+    dpi,
+):
+    data = temporal[
+        temporal["strategy"].isin(strategies)
+        & (temporal["sequence_coverage"] >= min_sequence_coverage)
+    ]
+    if data.empty:
+        print(f"Skip {stem}: no matching temporal data")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 7), constrained_layout=True)
     for configuration, group in data.groupby("configuration", sort=False):
         group = group.sort_values("frame_index")
         ax.plot(
             group["frame_index"],
             group["foreground_mean_iou_after"],
+            linewidth=2.2 if configuration == "baseline" else 1.4,
             label=configuration,
         )
 
     ax.set_xlabel("Frame index")
     ax.set_ylabel("Foreground IoU")
-    ax.set_ylim(0, 1)
     ax.set_title(title)
-    ax.grid(alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(result_dir / filename, dpi=200)
-    plt.close(fig)
+    set_iou_axis(ax, data["foreground_mean_iou_after"])
+    ax.legend(fontsize=8, ncol=2)
+    save_figure(fig, output_dir, stem, dpi)
 
 
-def plot_budget(strategy, x_column, filename, title):
-    data = summary[
-        summary["strategy"].isin(["baseline", strategy])
-    ].dropna(subset=[x_column, "foreground_mean_iou_after"])
+def budget_annotation(row, strategy):
+    iou = row["foreground_mean_iou_after"]
+    if row["strategy"] == "baseline":
+        return f"baseline\nIoU={iou:.4f}"
+    if strategy == "fixed":
+        return f"N={int(row['prompt_interval'])}\nIoU={iou:.4f}"
+    return f"threshold={row['iou_threshold']:.2f}\nIoU={iou:.4f}"
 
+
+def plot_budget(
+    summary,
+    strategy,
+    x_column,
+    x_label,
+    output_dir,
+    stem,
+    title,
+    dpi,
+):
+    data = summary[summary["strategy"].isin(["baseline", strategy])].dropna(
+        subset=[x_column, "foreground_mean_iou_after"]
+    )
     data = data.sort_values(x_column)
+    if data.empty:
+        print(f"Skip {stem}: no matching summary data")
+        return
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(12, 7), constrained_layout=True)
     ax.plot(
         data[x_column],
         data["foreground_mean_iou_after"],
         marker="o",
+        markersize=7,
+        linewidth=2,
     )
 
-    for _, row in data.iterrows():
+    x_min = data[x_column].min()
+    x_range = max(data[x_column].max() - x_min, 1)
+    for point_index, (_, row) in enumerate(data.iterrows()):
+        x = row[x_column]
+        is_right = x > x_min + 0.8 * x_range
+        x_offset = -7 if is_right else 7
+        y_offset = 9 if strategy == "fixed" or point_index % 2 == 0 else -35
         ax.annotate(
-            row["configuration"],
-            (row[x_column], row["foreground_mean_iou_after"]),
-            xytext=(4, 5),
+            budget_annotation(row, strategy),
+            (x, row["foreground_mean_iou_after"]),
+            xytext=(x_offset, y_offset),
             textcoords="offset points",
             fontsize=8,
+            ha="right" if is_right else "left",
+            bbox={
+                "boxstyle": "round,pad=0.2",
+                "fc": "white",
+                "alpha": 0.75,
+                "ec": "none",
+            },
         )
 
-    ax.set_xlabel(x_column)
+    ax.set_xlabel(x_label)
     ax.set_ylabel("Foreground IoU")
-    ax.set_ylim(0, 1)
     ax.set_title(title)
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(result_dir / filename, dpi=200)
-    plt.close(fig)
+    ax.margins(x=0.07)
+    set_iou_axis(ax, data["foreground_mean_iou_after"])
+    save_figure(fig, output_dir, stem, dpi)
 
 
-plot_temporal(
-    ["baseline", "fixed"],
-    "temporal_fixed.png",
-    "Fixed-interval prompting",
-)
+def main():
+    args = parse_args()
+    if not 0 <= args.min_sequence_coverage <= 1:
+        raise ValueError("--min-sequence-coverage must be in [0, 1]")
 
-plot_temporal(
-    ["baseline", "adaptive"],
-    "temporal_adaptive.png",
-    "Adaptive correction",
-)
+    summary, temporal = load_results(args.result_dir)
 
-plot_budget(
-    "fixed",
-    "ordinary_prompts_per_1000_hand_view_frames",
-    "budget_fixed.png",
-    "Fixed prompting: prompt budget vs IoU",
-)
+    plot_temporal(
+        temporal,
+        ["baseline", "fixed"],
+        args.result_dir,
+        "temporal_fixed",
+        "Fixed-interval GT-mask prompting over time",
+        args.min_sequence_coverage,
+        args.dpi,
+    )
+    plot_temporal(
+        temporal,
+        ["baseline", "adaptive"],
+        args.result_dir,
+        "temporal_adaptive",
+        "Adaptive point correction over time",
+        args.min_sequence_coverage,
+        args.dpi,
+    )
+    plot_budget(
+        summary,
+        "fixed",
+        "ordinary_prompts_per_1000_hand_view_frames",
+        "GT-mask prompts per 1,000 hand-view frames",
+        args.result_dir,
+        "budget_fixed",
+        "Fixed GT-mask prompting: prompt budget vs test IoU",
+        args.dpi,
+    )
+    plot_budget(
+        summary,
+        "adaptive",
+        "correction_clicks_per_1000_hand_view_frames",
+        "Correction clicks per 1,000 hand-view frames",
+        args.result_dir,
+        "budget_adaptive",
+        "Adaptive point correction: click budget vs test IoU",
+        args.dpi,
+    )
+    print(f"Saved plots to: {args.result_dir}")
 
-plot_budget(
-    "adaptive",
-    "correction_clicks_per_1000_hand_view_frames",
-    "budget_adaptive.png",
-    "Adaptive correction: click budget vs IoU",
-)
+
+if __name__ == "__main__":
+    main()
