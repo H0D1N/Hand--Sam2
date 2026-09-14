@@ -143,7 +143,7 @@ def check_evaluation_split_is_forwarded_without_augmentation():
         image_size=IMAGE_SIZE,
         num_views=2,
         clip_length=2,
-        val_clip_stride=2,
+        eval_clip_stride=2,
         val_batch_size=1,
         num_workers=0,
         prefetch_factor=2,

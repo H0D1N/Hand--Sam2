@@ -13,6 +13,21 @@ from .losses import LOSS_NAMES
 from .visualization import save_multiview_visualization
 
 
+def _accumulate_validation_loss(
+    stats,
+    loss,
+    loss_details,
+    num_clips,
+):
+    stats["loss_sum"] += loss.item() * num_clips
+    for name in LOSS_NAMES:
+        mean_hand_loss = (
+            loss_details["left"][name] + loss_details["right"][name]
+        ) / 2.0
+        stats[f"{name}_sum"] += mean_hand_loss.item() * num_clips
+    stats["clips"] += num_clips
+
+
 def run_training_epoch(
     model: torch.nn.Module,
     loss_fn: torch.nn.Module,
@@ -171,9 +186,10 @@ def run_validation_epoch(
     visualization_fn=save_multiview_visualization,
     metric_start_frame: int = 0,
 ) -> dict[str, dict[str, float | None]]:
-    """验证一个 epoch。"""
+    """在 eval 模式下评测一个数据集 split。"""
 
     model.eval()
+    evaluation_split = getattr(args, "split", "val")
 
     stats = {
         name: {
@@ -214,15 +230,12 @@ def run_validation_epoch(
             for name in batch["dataset_name"]
         ]
 
-        stats["overall"]["loss_sum"] += loss.item() * batch_size
-        for name in LOSS_NAMES:
-            mean_hand_loss = (
-                loss_details["left"][name] + loss_details["right"][name]
-            ) / 2.0
-            stats["overall"][f"{name}_sum"] += (
-                mean_hand_loss.item() * batch_size
-            )
-        stats["overall"]["clips"] += batch_size
+        _accumulate_validation_loss(
+            stats["overall"],
+            loss,
+            loss_details,
+            batch_size,
+        )
 
         # 分别统计 MultiServer 和 DexYCB loss。
         for group in ("multiserver", "dexycb"):
@@ -244,16 +257,12 @@ def run_validation_epoch(
                     right_masks,
                     sample_indices=clip_indices,
                 )
-            stats[group]["loss_sum"] += group_loss.item() * len(clip_indices)
-            for name in LOSS_NAMES:
-                mean_hand_loss = (
-                    group_loss_details["left"][name]
-                    + group_loss_details["right"][name]
-                ) / 2.0
-                stats[group][f"{name}_sum"] += (
-                    mean_hand_loss.item() * len(clip_indices)
-                )
-            stats[group]["clips"] += len(clip_indices)
+            _accumulate_validation_loss(
+                stats[group],
+                group_loss,
+                group_loss_details,
+                len(clip_indices),
+            )
 
         # frame_outputs 是长度为 T 的 list，每帧预测 batch 为 B*V。
         for frame_idx, outputs in enumerate(frame_outputs):
@@ -326,7 +335,7 @@ def run_validation_epoch(
                     frame_outputs=frame_outputs,
                     clip_idx=clip_idx,
                     sequence_idx=sequence_idx,
-                    split="val",
+                    split="val" if evaluation_split == "val" else "train_eval",
                     epoch=epoch,
                     args=args,
                 )
@@ -336,7 +345,9 @@ def run_validation_epoch(
         if step % args.log_interval == 0 or step == len(loader):
             overall = stats["overall"]
             logging.info(
-                "Val Epoch %d | step %d/%d | loss=%.4f | iou=%.4f | dice=%.4f",
+                "%s Eval Epoch %d | step %d/%d | "
+                "loss=%.4f | iou=%.4f | dice=%.4f",
+                evaluation_split.upper(),
                 epoch + 1,
                 step,
                 len(loader),
@@ -346,7 +357,7 @@ def run_validation_epoch(
             )
 
     if stats["overall"]["clips"] == 0:
-        raise ValueError("验证 DataLoader 中没有 Clip")
+        raise ValueError("评测 DataLoader 中没有 Clip")
 
     results = {}
 

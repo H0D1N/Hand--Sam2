@@ -29,7 +29,10 @@ def build_prompt_request(args) -> PromptRequest:
 
 
 def main() -> None:
-    args = parse_args(include_multiview_ablation=True)
+    args = parse_args(
+        include_multiview_ablation=True,
+        include_split=True,
+    )
     if args.prompt_mode is None:
         args.prompt_mode = "auto"
 

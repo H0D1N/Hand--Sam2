@@ -19,7 +19,14 @@ DEFAULT_DATASET_NAMES = "xingyi_4-5090_oak150-100output", "wuwen_4-5090_release-
 def add_dataloader_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     group = parser.add_argument_group("Dataloader")
     group.add_argument("--clip-length", type=int, default=8)
-    group.add_argument("--val-clip-stride", type=int, default=8)
+    group.add_argument(
+        "--eval-clip-stride",
+        "--val-clip-stride",
+        dest="eval_clip_stride",
+        type=int,
+        default=8,
+        help="评测 Clip 的起点间隔；--val-clip-stride 是兼容旧命令的别名",
+    )
     group.add_argument("--val-batch-size", type=int, default=1)
     group.add_argument("--num-workers", type=int, default=4)
     group.add_argument("--prefetch-factor", type=int, default=2)
@@ -28,14 +35,18 @@ def add_dataloader_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
 
     return parser
 
-def add_dataset_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+def add_dataset_arguments(
+    parser: argparse.ArgumentParser,
+    include_split: bool = False,
+) -> argparse.ArgumentParser:
     group = parser.add_argument_group("Dataset")
-    group.add_argument(
-        "--split",
-        choices=("train", "val"),
-        default="val",
-        help="评测 train 或 val 序列；两者都不启用数据增强",
-    )
+    if include_split:
+        group.add_argument(
+            "--split",
+            choices=("train", "val"),
+            default="val",
+            help="评测 train 或 val 序列；两者都不启用数据增强",
+        )
     group.add_argument("--dataset", dest="dataset_mode", choices=("multiserver", "dexycb", "mixed"), default="mixed")
     group.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     group.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
@@ -125,7 +136,10 @@ def add_evaluation_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     group.add_argument("--multimask-output", action=argparse.BooleanOptionalAction, default=False)
     return parser
 
-def parse_args(include_multiview_ablation=False) -> argparse.Namespace:
+def parse_args(
+    include_multiview_ablation=False,
+    include_split=False,
+) -> argparse.Namespace:
     """解析三种模型共用的验证数据与运行参数。"""
     parser = argparse.ArgumentParser(
         description="Evaluate Framewise, Memory, or MultiView models on shared validation clips."
@@ -136,7 +150,7 @@ def parse_args(include_multiview_ablation=False) -> argparse.Namespace:
         parser,
         include_multiview_ablation=include_multiview_ablation,
     )
-    add_dataset_arguments(parser)
+    add_dataset_arguments(parser, include_split=include_split)
     add_dataloader_arguments(parser)
     add_loss_arguments(parser)
     add_prompt_arguments(parser)
@@ -163,8 +177,8 @@ def parse_args(include_multiview_ablation=False) -> argparse.Namespace:
     if args.clip_length < 2:
         parser.error("--clip-length 必须至少为 2")
 
-    if args.val_clip_stride < args.clip_length:
-        parser.error("--val-clip-stride 不能小于 --clip-length")
+    if args.eval_clip_stride < args.clip_length:
+        parser.error("--eval-clip-stride 不能小于 --clip-length")
 
     if args.num_views < 2:
         parser.error("--num-views 必须至少为 2")
@@ -197,15 +211,16 @@ def parse_args(include_multiview_ablation=False) -> argparse.Namespace:
 
 
 def _build_evaluation_frame_dataset(args: argparse.Namespace):
+    split = getattr(args, "split", "val")
     frame_datasets = []
     if args.dataset_mode in {"multiserver", "mixed"}:
         frame_datasets.append(MultiServerDualHandDataset(
-            dataset_root=args.dataset_root, split=args.split, test_seq_count=args.test_seq_count,
+            dataset_root=args.dataset_root, split=split, test_seq_count=args.test_seq_count,
             image_size=args.image_size, use_augmentation=False, dataset_names=args.dataset_names,
         ))
     if args.dataset_mode in {"dexycb", "mixed"}:
         frame_datasets.append(DexYCBDataset(
-            dataset_root=args.dex_ycb_root, split=args.split, setup="s0",
+            dataset_root=args.dex_ycb_root, split=split, setup="s0",
             image_size=args.image_size, use_augmentation=False,
         ))
 
@@ -228,7 +243,7 @@ def build_zero_shot_loader(args: argparse.Namespace, device: torch.device, colla
     dataset = ConsecutiveClipDataset(
         _build_evaluation_frame_dataset(args),
         clip_length=args.clip_length,
-        clip_stride=args.val_clip_stride,
+        clip_stride=args.eval_clip_stride,
     )
     if len(dataset) == 0:
         raise ValueError("验证集没有生成任何连续 Clip")
@@ -241,7 +256,7 @@ def build_multiview_zero_shot_loader(args: argparse.Namespace, device: torch.dev
         _build_evaluation_frame_dataset(args),
         num_views=args.num_views,
         clip_length=args.clip_length,
-        clip_stride=args.val_clip_stride,
+        clip_stride=args.eval_clip_stride,
         use_augmentation=False,
     )
     if len(dataset) == 0:
