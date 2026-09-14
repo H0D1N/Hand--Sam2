@@ -217,11 +217,12 @@ def _build_evaluation_frame_dataset(args: argparse.Namespace):
         frame_datasets.append(MultiServerDualHandDataset(
             dataset_root=args.dataset_root, split=split, test_seq_count=args.test_seq_count,
             image_size=args.image_size, use_augmentation=False, dataset_names=args.dataset_names,
+            retain_originals=True,
         ))
     if args.dataset_mode in {"dexycb", "mixed"}:
         frame_datasets.append(DexYCBDataset(
             dataset_root=args.dex_ycb_root, split=split, setup="s0",
-            image_size=args.image_size, use_augmentation=False,
+            image_size=args.image_size, use_augmentation=False, retain_originals=True,
         ))
 
     return CombinedStreamDataset(frame_datasets) if len(frame_datasets) > 1 else frame_datasets[0]

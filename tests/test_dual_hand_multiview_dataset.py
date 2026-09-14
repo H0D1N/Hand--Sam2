@@ -23,7 +23,8 @@ IMAGE_SIZE = 16
 
 
 class FakeMultiViewFrameDataset(Dataset):
-    def __init__(self, split="train"):
+    def __init__(self, split="train", retain_originals=False):
+        self.retain_originals = retain_originals
         self.streams = {
             f"dataset/{split}/cam-a": {
                 "dataset_name": "dataset",
@@ -53,9 +54,13 @@ class FakeMultiViewFrameDataset(Dataset):
             "left_mask": left_mask,
             "right_mask": right_mask,
             "original_size": (IMAGE_SIZE, IMAGE_SIZE),
-            "original_image": None,
-            "original_left_mask": None,
-            "original_right_mask": None,
+            "original_image": image.clone() if self.retain_originals else None,
+            "original_left_mask": (
+                left_mask.clone() if self.retain_originals else None
+            ),
+            "original_right_mask": (
+                right_mask.clone() if self.retain_originals else None
+            ),
             "image_path": f"{index}.png",
             "mask_path": f"{index}.png",
             "sample_id": str(index),
@@ -130,8 +135,15 @@ def check_evaluation_split_is_forwarded_without_augmentation():
     calls = []
 
     def build_multiserver(**kwargs):
-        calls.append((kwargs["split"], kwargs["use_augmentation"]))
-        return FakeMultiViewFrameDataset(kwargs["split"])
+        calls.append((
+            kwargs["split"],
+            kwargs["use_augmentation"],
+            kwargs["retain_originals"],
+        ))
+        return FakeMultiViewFrameDataset(
+            kwargs["split"],
+            retain_originals=kwargs["retain_originals"],
+        )
 
     args = SimpleNamespace(
         split="train",
@@ -159,8 +171,10 @@ def check_evaluation_split_is_forwarded_without_augmentation():
             torch.device("cpu"),
         )
 
-    assert calls == [("train", False)]
+    assert calls == [("train", False, True)]
     assert not loader.dataset.use_augmentation
+    batch = next(iter(loader))
+    assert batch["original_left_mask"][0][0][0] is not None
 
 
 def main():

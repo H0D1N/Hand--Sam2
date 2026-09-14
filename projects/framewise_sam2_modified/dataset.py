@@ -285,6 +285,7 @@ class MultiServerDualHandDataset(Dataset):
         image_size: int = 1024,
         use_augmentation: bool = False,
         dataset_names: list[str] | None = None,
+        retain_originals: bool | None = None,
     ) -> None:
         if split not in {"train", "val"}:
             raise ValueError(f"split 必须是 'train' 或 'val'，当前是 {split!r}")
@@ -298,6 +299,9 @@ class MultiServerDualHandDataset(Dataset):
         self.dataset_root = Path(dataset_root)
         self.split = split
         self.image_size = image_size
+        self.retain_originals = (
+            split == "val" if retain_originals is None else retain_originals
+        )
         self.streams = {}
         self.samples = []
         self.mask_values = {}
@@ -522,17 +526,17 @@ class MultiServerDualHandDataset(Dataset):
                 interpolation=cv2.INTER_NEAREST,
             )
 
-        # 验证时保留原图和原始 mask，用来计算指标与可视化。
+        # 验证或显式评测 train split 时保留原图与原始 mask。
         original_image = (
             torch.from_numpy(image_np.copy()).permute(2, 0, 1)
-            if self.split == "val" else None)
+            if self.retain_originals else None)
 
         original_left_mask = (
             torch.from_numpy(left_mask_np.astype(np.float32)).unsqueeze(0)
-            if self.split == "val" else None)
+            if self.retain_originals else None)
         original_right_mask = (
             torch.from_numpy(right_mask_np.astype(np.float32)).unsqueeze(0)
-            if self.split == "val" else None)
+            if self.retain_originals else None)
 
         if self.augmentation is not None:
             transformed = self.augmentation(
@@ -614,6 +618,7 @@ class DexYCBDataset(Dataset):
         setup: str = "s0",
         image_size: int = 1024,
         use_augmentation: bool = False,
+        retain_originals: bool | None = None,
     ) -> None:
         if split not in {"train", "val"}:
             raise ValueError(f"split 必须是 train 或 val，当前是 {split!r}")
@@ -621,6 +626,9 @@ class DexYCBDataset(Dataset):
         self.dataset_root = Path(dataset_root).expanduser().resolve()
         self.split = split
         self.image_size = image_size
+        self.retain_originals = (
+            split == "val" if retain_originals is None else retain_originals
+        )
         self.dataset_name = "DexYCB"
         self.streams = {}
 
@@ -695,14 +703,14 @@ class DexYCBDataset(Dataset):
 
         original_image = (
             torch.from_numpy(image_np.copy()).permute(2, 0, 1)
-            if self.split == "val" else None)
+            if self.retain_originals else None)
 
         original_left_mask = (
             torch.from_numpy(left_mask_np.astype(np.float32)).unsqueeze(0)
-            if self.split == "val" else None)
+            if self.retain_originals else None)
         original_right_mask = (
             torch.from_numpy(right_mask_np.astype(np.float32)).unsqueeze(0)
-            if self.split == "val" else None)
+            if self.retain_originals else None)
 
 
         if self.augmentation is not None:
