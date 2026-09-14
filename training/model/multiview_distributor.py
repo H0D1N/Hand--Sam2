@@ -17,6 +17,7 @@ class MultiViewDistributionLayer(nn.Module):
         d_model: int,
         cross_attention: nn.Module,
         dropout: float,
+        residual_scale_init: float = 1e-3,
     ) -> None:
         super().__init__()
 
@@ -25,7 +26,9 @@ class MultiViewDistributionLayer(nn.Module):
         self.cross_attention_norm = nn.LayerNorm(d_model)
         self.cross_attn = cross_attention
         self.cross_attention_dropout = nn.Dropout(dropout)
-        self.residual_scale = nn.Parameter(torch.tensor(1e-3))
+        self.residual_scale = nn.Parameter(
+            torch.tensor(float(residual_scale_init))
+        )
 
     def forward(
         self,

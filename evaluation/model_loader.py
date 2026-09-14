@@ -76,6 +76,9 @@ def load_evaluation_model(model_type: str, checkpoint_path, device):
             num_latents=checkpoint_args["num_latents"],
             num_aggregator_layers=checkpoint_args["num_aggregator_layers"],
             num_distributor_layers=checkpoint_args["num_distributor_layers"],
+            multiview_residual_scale_init=checkpoint_args.get(
+                "multiview_residual_scale_init", 1e-3
+            ),
         )
     else:
         raise ValueError(f"不支持的 model_type: {model_type}")
@@ -91,4 +94,3 @@ def load_evaluation_model(model_type: str, checkpoint_path, device):
         checkpoint.get("epoch", "unknown"),
     )
     return model
-

@@ -75,6 +75,11 @@ def add_model_arguments(parser, include_multiview_ablation=False):
     structure.add_argument("--num-latents", type=int, default=144)
     structure.add_argument("--num-aggregator-layers", type=int, default=2)
     structure.add_argument("--num-distributor-layers", type=int, default=1)
+    structure.add_argument(
+        "--multiview-residual-scale-init",
+        type=float,
+        default=1e-3,
+    )
     if include_multiview_ablation:
         structure.add_argument(
             "--disable-multiview-fusion",

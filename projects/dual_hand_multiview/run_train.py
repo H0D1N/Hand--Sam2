@@ -45,6 +45,12 @@ def parse_args():
     parser.add_argument("--num-aggregator-layers", type=int, default=2)
     parser.add_argument("--num-distributor-layers", type=int, default=1)
     parser.add_argument(
+        "--multiview-residual-scale-init",
+        type=float,
+        default=1e-3,
+        help="Distributor 回注残差的可学习 scale 初始值",
+    )
+    parser.add_argument(
         "--finetune-mode",
         choices=("multiview-only", "multiview-memory", "multiview-memory-sam1"),
         default="multiview-only",
@@ -157,6 +163,14 @@ def build_prompt_request(args):
     )
 
 
+def get_multiview_residual_scales(model):
+    return {
+        name: parameter.detach().float().item()
+        for name, parameter in model.named_parameters()
+        if name.endswith("residual_scale")
+    }
+
+
 def main():
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +187,7 @@ def main():
         mode="train",
         image_size=args.image_size,
         num_latents=args.num_latents,
+        multiview_residual_scale_init=args.multiview_residual_scale_init,
         num_aggregator_layers=args.num_aggregator_layers,
         num_distributor_layers=args.num_distributor_layers,
         use_image_adapter=args.use_image_adapter,
@@ -187,6 +202,10 @@ def main():
     )
     args.image_size = model.image_size
     configure_multiview_training(model, args.finetune_mode)
+    logging.info(
+        "Initial multiview residual scales | %s",
+        get_multiview_residual_scales(model),
+    )
 
     loss_fn = MultiViewDualHandMemoryLoss(
         mask_loss_weight=args.mask_loss_weight,
@@ -236,6 +255,7 @@ def main():
         overall_val = val_metrics["overall"]
         scheduler.step(overall_val["loss"])
         current_lr = float(optimizer.param_groups[0]["lr"])
+        residual_scales = get_multiview_residual_scales(model)
         improved = overall_val["iou"] > best_val_iou + args.early_stop_min_delta
         if improved:
             best_val_iou = float(overall_val["iou"])
@@ -248,11 +268,17 @@ def main():
             "lr": current_lr,
             "train_loss": float(train_metrics["loss"]),
             "validation": val_metrics,
+            "multiview_residual_scales": residual_scales,
         }
         history.append(epoch_metrics)
         logging.info(
             "Epoch %d | train_loss=%.4f | val_loss=%.4f | val_iou=%.4f | val_dice=%.4f | lr=%.2e",
             epoch + 1, train_metrics["loss"], overall_val["loss"], overall_val["iou"], overall_val["dice"], current_lr,
+        )
+        logging.info(
+            "Epoch %d | multiview residual scales | %s",
+            epoch + 1,
+            residual_scales,
         )
 
         save_checkpoint(
@@ -283,6 +309,13 @@ def main():
                 for name, value in metrics.items():
                     if value is not None:
                         writer.add_scalar(f"validation/{group}/{name}", value, epoch + 1)
+            for name, value in residual_scales.items():
+                module_name = name.removesuffix(".residual_scale").replace(".", "/")
+                writer.add_scalar(
+                    f"multiview_residual_scale/{module_name}",
+                    value,
+                    epoch + 1,
+                )
             writer.flush()
 
         if args.early_stop_patience > 0 and epochs_without_improvement >= args.early_stop_patience:

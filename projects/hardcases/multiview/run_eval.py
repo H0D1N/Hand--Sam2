@@ -63,6 +63,7 @@ def main() -> None:
             num_latents=args.num_latents,
             num_aggregator_layers=args.num_aggregator_layers,
             num_distributor_layers=args.num_distributor_layers,
+            multiview_residual_scale_init=args.multiview_residual_scale_init,
             num_correction_pt_per_frame=args.num_correction_pt_per_frame,
             add_all_frames_to_correct_as_cond=args.add_all_frames_to_correct_as_cond,
         )

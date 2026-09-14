@@ -14,6 +14,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from training.model.sam2_multiview_dual_hand_memory import (
     SAM2MultiViewDualHandMemory,
 )
+from training.model.multiview_distributor import MultiViewDistributionLayer
 
 
 class FakeDecoder(nn.Module):
@@ -134,11 +135,23 @@ def check_disabled_multiview_fusion_is_identity():
     assert fused is pix_feat
 
 
+def check_residual_scale_initialization_is_configurable():
+    layer = MultiViewDistributionLayer(
+        d_model=4,
+        cross_attention=nn.Identity(),
+        dropout=0.0,
+        residual_scale_init=1e-2,
+    )
+
+    assert layer.residual_scale.item() == torch.tensor(1e-2).item()
+
+
 def main():
     check_chunked_encoding_preserves_batch_view_order()
     check_encoding_keeps_only_required_gradients()
     check_invalid_views_per_encode()
     check_disabled_multiview_fusion_is_identity()
+    check_residual_scale_initialization_is_configurable()
     print("Dual-hand multiview chunked encoding: OK")
 
 

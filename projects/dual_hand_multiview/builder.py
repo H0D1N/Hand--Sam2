@@ -38,7 +38,12 @@ def _attention():
     return Attention(embedding_dim=256, num_heads=1, downsample_rate=1, dropout=0.1)
 
 
-def build_multiview_modules(num_latents, num_aggregator_layers, num_distributor_layers):
+def build_multiview_modules(
+    num_latents,
+    num_aggregator_layers,
+    num_distributor_layers,
+    residual_scale_init=1e-3,
+):
     aggregation_layer = MultiViewAggregationLayer(
         d_model=256,
         dim_feedforward=2048,
@@ -51,6 +56,7 @@ def build_multiview_modules(num_latents, num_aggregator_layers, num_distributor_
         d_model=256,
         dropout=0.1,
         cross_attention=_attention(),
+        residual_scale_init=residual_scale_init,
     )
 
     aggregator = MultiViewFeatureAggregator(
@@ -67,11 +73,18 @@ def build_multiview_modules(num_latents, num_aggregator_layers, num_distributor_
     return aggregator, distributor
 
 
-def _create_model(image_size, num_latents, num_aggregator_layers, num_distributor_layers):
+def _create_model(
+    image_size,
+    num_latents,
+    num_aggregator_layers,
+    num_distributor_layers,
+    multiview_residual_scale_init=1e-3,
+):
     aggregator, distributor = build_multiview_modules(
         num_latents=num_latents,
         num_aggregator_layers=num_aggregator_layers,
         num_distributor_layers=num_distributor_layers,
+        residual_scale_init=multiview_residual_scale_init,
     )
     model_cls = partial(
         SAM2MultiViewDualHandMemory,
@@ -95,12 +108,14 @@ def _build_from_sam_checkpoint(
     num_aggregator_layers,
     num_distributor_layers,
     adapter_args,
+    multiview_residual_scale_init,
 ):
     model = _create_model(
         image_size,
         num_latents,
         num_aggregator_layers,
         num_distributor_layers,
+        multiview_residual_scale_init,
     )
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
@@ -117,6 +132,7 @@ def _build_from_memory_checkpoint(
     num_latents,
     num_aggregator_layers,
     num_distributor_layers,
+    multiview_residual_scale_init,
 ):
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     checkpoint_args = checkpoint["args"]
@@ -126,6 +142,7 @@ def _build_from_memory_checkpoint(
         num_latents,
         num_aggregator_layers,
         num_distributor_layers,
+        multiview_residual_scale_init,
     )
 
     adapter_args = {key: checkpoint_args[key] for key in ADAPTER_KEYS}
@@ -142,6 +159,7 @@ def build_sam2_multiview_dual_hand_memory_tiny(
     mode="eval",
     image_size=768,
     num_latents=144,
+    multiview_residual_scale_init=1e-3,
     use_image_adapter=False,
     use_decoder_adapter=False,
     adapter_dim=64,
@@ -172,6 +190,7 @@ def build_sam2_multiview_dual_hand_memory_tiny(
             num_aggregator_layers,
             num_distributor_layers,
             adapter_args,
+            multiview_residual_scale_init,
         )
     else:
         model = _build_from_memory_checkpoint(
@@ -179,6 +198,7 @@ def build_sam2_multiview_dual_hand_memory_tiny(
             num_latents,
             num_aggregator_layers,
             num_distributor_layers,
+            multiview_residual_scale_init,
         )
 
     _configure_prompt_sampling(
