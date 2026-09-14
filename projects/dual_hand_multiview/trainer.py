@@ -178,6 +178,7 @@ def run_validation_epoch(
     stats = {
         name: {
             "loss_sum": 0.0,
+            **{f"{loss_name}_sum": 0.0 for loss_name in LOSS_NAMES},
             "clips": 0,
             "iou_sum": 0.0,
             "dice_sum": 0.0,
@@ -205,7 +206,7 @@ def run_validation_epoch(
             prompt_request=prompt_request,
             views_per_encode=args.views_per_encode,
         )
-        loss, _ = loss_fn(frame_outputs, left_masks, right_masks)
+        loss, loss_details = loss_fn(frame_outputs, left_masks, right_masks)
 
         batch_size, num_views, num_frames = images.shape[:3]
         dataset_groups = [
@@ -214,6 +215,13 @@ def run_validation_epoch(
         ]
 
         stats["overall"]["loss_sum"] += loss.item() * batch_size
+        for name in LOSS_NAMES:
+            mean_hand_loss = (
+                loss_details["left"][name] + loss_details["right"][name]
+            ) / 2.0
+            stats["overall"][f"{name}_sum"] += (
+                mean_hand_loss.item() * batch_size
+            )
         stats["overall"]["clips"] += batch_size
 
         # 分别统计 MultiServer 和 DexYCB loss。
@@ -226,17 +234,25 @@ def run_validation_epoch(
             if not clip_indices:
                 continue
 
-            group_loss = (
-                loss
-                if len(clip_indices) == batch_size
-                else loss_fn(
+            if len(clip_indices) == batch_size:
+                group_loss = loss
+                group_loss_details = loss_details
+            else:
+                group_loss, group_loss_details = loss_fn(
                     frame_outputs,
                     left_masks,
                     right_masks,
                     sample_indices=clip_indices,
-                )[0]
-            )
+                )
             stats[group]["loss_sum"] += group_loss.item() * len(clip_indices)
+            for name in LOSS_NAMES:
+                mean_hand_loss = (
+                    group_loss_details["left"][name]
+                    + group_loss_details["right"][name]
+                ) / 2.0
+                stats[group][f"{name}_sum"] += (
+                    mean_hand_loss.item() * len(clip_indices)
+                )
             stats[group]["clips"] += len(clip_indices)
 
         # frame_outputs 是长度为 T 的 list，每帧预测 batch 为 B*V。
@@ -340,6 +356,7 @@ def run_validation_epoch(
                 metric: None
                 for metric in (
                     "loss",
+                    *LOSS_NAMES,
                     "iou",
                     "dice",
                     "object_accuracy",
@@ -365,6 +382,10 @@ def run_validation_epoch(
 
         results[name] = {
             "loss": values["loss_sum"] / values["clips"],
+            **{
+                loss_name: values[f"{loss_name}_sum"] / values["clips"]
+                for loss_name in LOSS_NAMES
+            },
             "iou": values["iou_sum"] / max(values["foreground_hands"], 1),
             "dice": values["dice_sum"] / max(values["foreground_hands"], 1),
             "object_accuracy": (

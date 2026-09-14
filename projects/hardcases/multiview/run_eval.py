@@ -111,6 +111,7 @@ def main() -> None:
     dump_json(
         {
             "best_val_iou": float(overall["iou"]),
+            "evaluation_split": args.split,
             "model_parameters": sum(parameter.numel() for parameter in model.parameters()),
             "epochs": [epoch_metrics],
         },
@@ -119,10 +120,17 @@ def main() -> None:
 
     logging.info(
         "MULTIVIEW EVALUATION COMPLETE | "
-        "val_loss=%.4f | val_iou=%.4f | val_dice=%.4f | "
+        "split=%s | loss=%.4f | mask_focal=%.4f | "
+        "dice_loss=%.4f | iou_loss=%.4f | class_loss=%.4f | "
+        "iou=%.4f | dice=%.4f | "
         "obj_acc=%.4f | obj_precision=%.4f | "
         "obj_recall=%.4f | obj_f1=%.4f",
+        args.split,
         overall["loss"],
+        overall["loss_mask"],
+        overall["loss_dice"],
+        overall["loss_iou"],
+        overall["loss_class"],
         overall["iou"],
         overall["dice"],
         overall["object_accuracy"],

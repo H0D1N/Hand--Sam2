@@ -30,6 +30,12 @@ def add_dataloader_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
 
 def add_dataset_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     group = parser.add_argument_group("Dataset")
+    group.add_argument(
+        "--split",
+        choices=("train", "val"),
+        default="val",
+        help="评测 train 或 val 序列；两者都不启用数据增强",
+    )
     group.add_argument("--dataset", dest="dataset_mode", choices=("multiserver", "dexycb", "mixed"), default="mixed")
     group.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     group.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
@@ -190,16 +196,16 @@ def parse_args(include_multiview_ablation=False) -> argparse.Namespace:
     return args
 
 
-def _build_validation_frame_dataset(args: argparse.Namespace):
+def _build_evaluation_frame_dataset(args: argparse.Namespace):
     frame_datasets = []
     if args.dataset_mode in {"multiserver", "mixed"}:
         frame_datasets.append(MultiServerDualHandDataset(
-            dataset_root=args.dataset_root, split="val", test_seq_count=args.test_seq_count,
+            dataset_root=args.dataset_root, split=args.split, test_seq_count=args.test_seq_count,
             image_size=args.image_size, use_augmentation=False, dataset_names=args.dataset_names,
         ))
     if args.dataset_mode in {"dexycb", "mixed"}:
         frame_datasets.append(DexYCBDataset(
-            dataset_root=args.dex_ycb_root, split="val", setup="s0",
+            dataset_root=args.dex_ycb_root, split=args.split, setup="s0",
             image_size=args.image_size, use_augmentation=False,
         ))
 
@@ -218,9 +224,9 @@ def _build_validation_loader(args, device, dataset, collate_fn):
 
 
 def build_zero_shot_loader(args: argparse.Namespace, device: torch.device, collate_fn=collate_clip_batch) -> DataLoader:
-    """加载共享验证集中的单视角连续 Clip。"""
+    """加载指定评测 split 中的单视角连续 Clip。"""
     dataset = ConsecutiveClipDataset(
-        _build_validation_frame_dataset(args),
+        _build_evaluation_frame_dataset(args),
         clip_length=args.clip_length,
         clip_stride=args.val_clip_stride,
     )
@@ -230,9 +236,9 @@ def build_zero_shot_loader(args: argparse.Namespace, device: torch.device, colla
 
 
 def build_multiview_zero_shot_loader(args: argparse.Namespace, device: torch.device) -> DataLoader:
-    """加载共享验证集中对齐的多视角连续 Clip。"""
+    """加载指定评测 split 中对齐的多视角连续 Clip。"""
     dataset = MultiViewConsecutiveClipDataset(
-        _build_validation_frame_dataset(args),
+        _build_evaluation_frame_dataset(args),
         num_views=args.num_views,
         clip_length=args.clip_length,
         clip_stride=args.val_clip_stride,

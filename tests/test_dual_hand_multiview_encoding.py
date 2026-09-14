@@ -15,6 +15,7 @@ from training.model.sam2_multiview_dual_hand_memory import (
     SAM2MultiViewDualHandMemory,
 )
 from training.model.multiview_distributor import MultiViewDistributionLayer
+from projects.dual_hand_multiview.trainer import run_validation_epoch
 
 
 class FakeDecoder(nn.Module):
@@ -50,6 +51,52 @@ class FakeChunkedEncoder(SAM2MultiViewDualHandMemory):
                 self.right_mask_decoder.conv_s1(main_feature),
             ],
         }
+
+
+class FakeEvaluationModel(nn.Module):
+    def forward(
+        self,
+        images,
+        left_masks,
+        right_masks,
+        prompt_request,
+        views_per_encode,
+    ):
+        batch_size, num_views, num_frames = images.shape[:3]
+        flat_size = batch_size * num_views
+        logits = torch.ones(flat_size, 1, *images.shape[-2:])
+        return [
+            {
+                hand: {
+                    "multistep_object_score_logits": [
+                        torch.ones(flat_size, 1)
+                    ],
+                    "pred_masks_high_res": logits,
+                }
+                for hand in ("left", "right")
+            }
+            for _ in range(num_frames)
+        ]
+
+
+class FakeEvaluationLoss(nn.Module):
+    def forward(
+        self,
+        frame_outputs,
+        left_masks,
+        right_masks,
+        sample_indices=None,
+    ):
+        details = {
+            hand: {
+                "loss_mask": torch.tensor(2.0),
+                "loss_dice": torch.tensor(3.0),
+                "loss_iou": torch.tensor(4.0),
+                "loss_class": torch.tensor(5.0),
+            }
+            for hand in ("left", "right")
+        }
+        return torch.tensor(52.0), details
 
 
 def check_chunked_encoding_preserves_batch_view_order():
@@ -146,12 +193,53 @@ def check_residual_scale_initialization_is_configurable():
     assert layer.residual_scale.item() == torch.tensor(1e-2).item()
 
 
+def check_validation_reports_loss_components():
+    images = torch.zeros(1, 2, 2, 3, 4, 4)
+    masks = torch.ones(1, 2, 2, 1, 4, 4)
+    batch = {
+        "image": images,
+        "left_mask": masks,
+        "right_mask": masks,
+        "original_left_mask": [[
+            [masks[0, view, frame] for frame in range(2)]
+            for view in range(2)
+        ]],
+        "original_right_mask": [[
+            [masks[0, view, frame] for frame in range(2)]
+            for view in range(2)
+        ]],
+        "dataset_name": ["test"],
+    }
+    args = type("Args", (), {
+        "views_per_encode": 1,
+        "skip_visualizations": True,
+        "log_interval": 1,
+    })()
+
+    metrics = run_validation_epoch(
+        model=FakeEvaluationModel(),
+        loss_fn=FakeEvaluationLoss(),
+        loader=[batch],
+        device=torch.device("cpu"),
+        args=args,
+        epoch=0,
+        prompt_request=None,
+    )["overall"]
+
+    assert metrics["loss"] == 52.0
+    assert metrics["loss_mask"] == 2.0
+    assert metrics["loss_dice"] == 3.0
+    assert metrics["loss_iou"] == 4.0
+    assert metrics["loss_class"] == 5.0
+
+
 def main():
     check_chunked_encoding_preserves_batch_view_order()
     check_encoding_keeps_only_required_gradients()
     check_invalid_views_per_encode()
     check_disabled_multiview_fusion_is_identity()
     check_residual_scale_initialization_is_configurable()
+    check_validation_reports_loss_components()
     print("Dual-hand multiview chunked encoding: OK")
 
 

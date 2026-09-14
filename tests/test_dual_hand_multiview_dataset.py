@@ -16,6 +16,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from projects.dual_hand_multiview import dataset as multiview_dataset
 from projects.dual_hand_multiview.dataset import MultiViewConsecutiveClipDataset
 from projects.framewise_sam2_modified.dataset import SAM2_MEAN, SAM2_STD
+from projects.hardcases import evaluation_common
 
 
 IMAGE_SIZE = 16
@@ -125,9 +126,47 @@ def check_build_dataloaders_augmentation_switch():
         assert not val_loader.dataset.use_augmentation
 
 
+def check_evaluation_split_is_forwarded_without_augmentation():
+    calls = []
+
+    def build_multiserver(**kwargs):
+        calls.append((kwargs["split"], kwargs["use_augmentation"]))
+        return FakeMultiViewFrameDataset(kwargs["split"])
+
+    args = SimpleNamespace(
+        split="train",
+        dataset_mode="multiserver",
+        dataset_root="multiserver",
+        dex_ycb_root=None,
+        dataset_names=None,
+        test_seq_count=2,
+        image_size=IMAGE_SIZE,
+        num_views=2,
+        clip_length=2,
+        val_clip_stride=2,
+        val_batch_size=1,
+        num_workers=0,
+        prefetch_factor=2,
+    )
+
+    with patch.object(
+        evaluation_common,
+        "MultiServerDualHandDataset",
+        side_effect=build_multiserver,
+    ):
+        loader = evaluation_common.build_multiview_zero_shot_loader(
+            args,
+            torch.device("cpu"),
+        )
+
+    assert calls == [("train", False)]
+    assert not loader.dataset.use_augmentation
+
+
 def main():
     check_multiview_clip_augmentation()
     check_build_dataloaders_augmentation_switch()
+    check_evaluation_split_is_forwarded_without_augmentation()
     print("Dual-hand multiview clip dataset: OK")
 
 
