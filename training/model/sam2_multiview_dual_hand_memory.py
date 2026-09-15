@@ -555,6 +555,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         run_mem_encoder=True,
         frames_to_add_correction_pt=None,
         gt_masks=None,
+        correction_stop_fn=None,
     ):
         """
         完成一只手在一帧上的预测、纠错和 Memory 写入。
@@ -711,6 +712,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
                 current_out=current_out,
                 sam_head=sam_head,
                 num_correction_points_per_frame=num_correction_points_per_frame,
+                correction_stop_fn=correction_stop_fn,
             )
 
             # final_sam_outputs 现在是最后一次纠错的结果。

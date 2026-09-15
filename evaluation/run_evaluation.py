@@ -35,6 +35,7 @@ CSV_FIELDS = (
     "prompt_interval",
     "iou_threshold",
     "correction_points",
+    "correction_clicks",
     "dataset",
     "sequence_id",
     "evaluation_id",
@@ -126,7 +127,7 @@ class MetricAccumulator:
                 self.ordinary_prompt_hand_views += 1
         if row["corrected"]:
             self.correction_hand_events.add((*timestep, row["hand"]))
-            self.correction_clicks += row["correction_points"]
+            self.correction_clicks += row["correction_clicks"]
 
         if row["frame_index"] < self.metric_start_frame:
             return
@@ -255,7 +256,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--adaptive-thresholds", type=float, nargs="+", default=(0.5,)
     )
-    parser.add_argument("--correction-points", type=int, default=1)
+    parser.add_argument(
+        "--correction-points",
+        type=int,
+        default=10,
+        help="单次 adaptive 纠错允许的最大点击轮数",
+    )
     parser.add_argument("--max-condition-frames", type=int, default=4)
 
     parser.add_argument(
@@ -297,7 +303,7 @@ def parse_args() -> argparse.Namespace:
     ):
         parser.error("--adaptive-thresholds 必须全部位于 [0, 1]")
     if args.correction_points < 1:
-        parser.error("--correction-points 必须大于 0")
+        parser.error("--correction-points 最大点击轮数必须大于 0")
     if args.max_condition_frames < 1:
         parser.error("--max-condition-frames 必须大于 0")
     if args.min_sequence_length < 1:

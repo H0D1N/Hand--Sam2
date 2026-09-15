@@ -49,6 +49,7 @@ class NaturalValMultiServerDataset(MultiServerDualHandDataset):
         self.samples = []
         self.mask_values = {}
         self.augmentation = None
+        self.retain_originals = True
 
         catalog_path = self.dataset_root / "datasets.json"
         if not catalog_path.is_file():

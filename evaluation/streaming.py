@@ -18,7 +18,7 @@ class EvaluationPolicy:
     prompt_mode: str = "mask"
     prompt_interval: int = 80
     iou_threshold: float = 0.5
-    correction_points: int = 1
+    correction_points: int = 10
     max_condition_frames: int = 4
 
     def __post_init__(self):
@@ -141,6 +141,7 @@ class LongVideoEvaluator:
         num_frames,
         gt_masks,
         correct,
+        correction_stop_fn,
         run_mem_encoder,
         num_views,
     ):
@@ -166,6 +167,7 @@ class LongVideoEvaluator:
             track_in_reverse=False,
             run_mem_encoder=run_mem_encoder,
             frames_to_add_correction_pt=[frame_index] if correct else [],
+            correction_stop_fn=correction_stop_fn,
             # SAM2 的误差点采样使用按位逻辑，要求 GT 为 bool。
             # 训练路径会在 prepare_prompt_inputs 中转换；流式评估绕过了
             # 该函数，因此需要在 track_step 边界保持相同约定。
@@ -231,6 +233,7 @@ class LongVideoEvaluator:
                             num_frames=sequence.num_frames,
                             gt_masks=gt_masks,
                             correct=False,
+                            correction_stop_fn=None,
                             run_mem_encoder=False,
                             num_views=num_views,
                         )
@@ -246,6 +249,13 @@ class LongVideoEvaluator:
                         trial_out = None
                         before_ious = None
 
+                    stop_correction = None
+                    if corrected:
+                        def stop_correction(logits):
+                            return min(_original_iou_per_view(
+                                logits, original_masks
+                            )) >= self.policy.iou_threshold
+
                     current_out = self._track_step(
                         hand=hand,
                         frame_index=frame_index,
@@ -260,6 +270,7 @@ class LongVideoEvaluator:
                         num_frames=sequence.num_frames,
                         gt_masks=gt_masks,
                         correct=corrected,
+                        correction_stop_fn=stop_correction,
                         run_mem_encoder=True,
                         num_views=num_views,
                     )
@@ -268,6 +279,10 @@ class LongVideoEvaluator:
                     )
                     if before_ious is None:
                         before_ious = after_ious
+                    correction_clicks = (
+                        len(current_out["multistep_point_inputs"]) - 1
+                        if corrected else 0
+                    )
 
                     memory_kind = (
                         "cond_frame_outputs"
@@ -303,6 +318,7 @@ class LongVideoEvaluator:
                                 self.policy.correction_points
                                 if self.policy.strategy == "adaptive" else None
                             ),
+                            "correction_clicks": correction_clicks,
                             "dataset": sequence.dataset_name,
                             "sequence_id": sequence.sequence_id,
                             "evaluation_id": sequence.evaluation_id,

@@ -15,9 +15,10 @@ Three strategies are available:
 
 `--prompt-mode mask|point` controls the ordinary prompt used by `baseline` and
 `fixed`. Adaptive correction always uses SAM2's positive/negative error points;
-`--correction-points` controls how many correction rounds are applied. `fixed`
-and `adaptive` are evaluated as separate trajectories rather than being mixed in
-one run.
+after correction is triggered, points are added until every synchronized view
+reaches the configured IoU threshold. `--correction-points` sets the safety cap
+on correction rounds per hand/frame (default: 10). `fixed` and `adaptive` are
+evaluated as separate trajectories rather than being mixed in one run.
 
 The default command evaluates `baseline` only. Select the other strategies and
 provide multiple parameter values to generate separate curve series. For a dense

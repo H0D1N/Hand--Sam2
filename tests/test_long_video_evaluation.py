@@ -57,7 +57,7 @@ class FakeFrameDataset:
 
 
 class FakeMemoryModel(nn.Module):
-    def __init__(self):
+    def __init__(self, correction_succeeds=True):
         super().__init__()
         self.anchor = nn.Parameter(torch.zeros(()))
         self.image_size = IMAGE_SIZE
@@ -65,6 +65,7 @@ class FakeMemoryModel(nn.Module):
         self.memory_temporal_stride_for_eval = 1
         self.max_obj_ptrs_in_encoder = 3
         self.use_obj_ptrs_in_encoder = True
+        self.correction_succeeds = correction_succeeds
         self.calls = []
 
     def forward_image(self, images):
@@ -93,6 +94,22 @@ class FakeMemoryModel(nn.Module):
         corrected = frame_idx in frames_to_add_correction_pt
         if corrected:
             assert gt_masks.dtype == torch.bool
+        correction_clicks = 0
+        if corrected:
+            max_correction_points = kwargs.get(
+                "num_correction_points_per_frame",
+                getattr(self, "num_correction_pt_per_frame", 1),
+            )
+            correction_stop_fn = kwargs.get("correction_stop_fn")
+            for _ in range(max_correction_points):
+                correction_clicks += 1
+                logits = (
+                    gt_masks.float() * 20.0 - 10.0
+                    if self.correction_succeeds
+                    else torch.full_like(gt_masks, -10.0, dtype=torch.float32)
+                )
+                if correction_stop_fn is not None and correction_stop_fn(logits):
+                    break
         self.calls.append({
             "hand": hand,
             "frame_idx": frame_idx,
@@ -100,15 +117,17 @@ class FakeMemoryModel(nn.Module):
             "corrected": corrected,
             "run_mem_encoder": run_mem_encoder,
             "num_views": kwargs.get("num_views"),
+            "correction_clicks": correction_clicks,
         })
-        if mask_inputs is not None or corrected:
+        if mask_inputs is not None:
             logits = gt_masks.float() * 20.0 - 10.0
-        else:
+        elif not corrected:
             logits = torch.full_like(gt_masks, -10.0, dtype=torch.float32)
             if logits.shape[0] > 1:
                 logits[0] = gt_masks[0].float() * 20.0 - 10.0
         return {
             "pred_masks_high_res": logits,
+            "multistep_point_inputs": [None] * (correction_clicks + 1),
             "maskmem_features": torch.zeros(gt_masks.shape[0], 1, 1, 1),
             "maskmem_pos_enc": [torch.zeros(gt_masks.shape[0], 1, 1, 1)],
             "obj_ptr": torch.zeros(gt_masks.shape[0], 1),
@@ -222,7 +241,7 @@ def check_adaptive_correction_is_decided_before_memory_commit():
         policy=EvaluationPolicy(
             strategy="adaptive",
             iou_threshold=0.5,
-            correction_points=1,
+            correction_points=3,
         ),
     )
     rows = evaluator.evaluate_sequence(
@@ -233,6 +252,7 @@ def check_adaptive_correction_is_decided_before_memory_commit():
     assert all(row["corrected"] for row in frame_one_rows)
     assert all(row["iou_before"] < 0.01 for row in frame_one_rows)
     assert all(row["iou_after"] == 1.0 for row in frame_one_rows)
+    assert all(row["correction_clicks"] == 1 for row in frame_one_rows)
 
     frame_one_calls = [call for call in model.calls if call["frame_idx"] == 1]
     for hand in ("left", "right"):
@@ -241,6 +261,28 @@ def check_adaptive_correction_is_decided_before_memory_commit():
         assert not hand_calls[0]["run_mem_encoder"]
         assert hand_calls[1]["run_mem_encoder"]
         assert hand_calls[1]["corrected"]
+        assert hand_calls[1]["correction_clicks"] == 1
+
+
+def check_adaptive_correction_stops_at_safety_cap():
+    evaluator = LongVideoEvaluator(
+        model=FakeMemoryModel(correction_succeeds=False),
+        model_type="memory",
+        device="cpu",
+        policy=EvaluationPolicy(
+            strategy="adaptive",
+            iou_threshold=0.5,
+            correction_points=3,
+        ),
+    )
+    rows = evaluator.evaluate_sequence(
+        ThreeFrameDataset(), build_three_frame_sequence()
+    )
+
+    corrected_rows = [row for row in rows if row["corrected"]]
+    assert corrected_rows
+    assert all(row["iou_after"] < 0.01 for row in corrected_rows)
+    assert all(row["correction_clicks"] == 3 for row in corrected_rows)
 
 
 def check_fixed_prompts_repeat_the_initial_prompt():
@@ -333,6 +375,7 @@ def main():
     check_long_video_alignment_and_gap_splitting()
     check_natural_validation_sequence_selection()
     check_adaptive_correction_is_decided_before_memory_commit()
+    check_adaptive_correction_stops_at_safety_cap()
     check_fixed_prompts_repeat_the_initial_prompt()
     check_multiview_adaptive_trigger_uses_all_views()
     check_strategy_parameter_sweep()

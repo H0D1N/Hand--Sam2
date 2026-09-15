@@ -635,6 +635,7 @@ class SAM2Train(SAM2Base):
         current_out,
         sam_head=None,
         num_correction_points_per_frame=None,
+        correction_stop_fn=None,
     ):
 
         assert gt_masks is not None
@@ -708,6 +709,8 @@ class SAM2Train(SAM2Base):
             all_pred_ious.append(ious)
             all_point_inputs.append(point_inputs)
             all_object_score_logits.append(object_score_logits)
+            if correction_stop_fn is not None and correction_stop_fn(high_res_masks):
+                break
 
         # Concatenate the masks along channel (to compute losses on all of them,
         # using `MultiStepIteractiveMasks`)
