@@ -13,20 +13,80 @@ from inference.sam2_dual_hand_video_predictor import SAM2DualHandVideoPredictor
 from projects.framewise_sam2_modified.builder import create_sam2_modified_tiny, inject_sam2_modified_adapters
 from training.model.sam2_dual_hand_memory import SAM2DualHandMemory
 from training.model.sam2_modified import SAM2Modified
+from test_long_video_evaluation import FakeMemoryModel
 from test_prediction_dataset import FrameDataset
 
 
-@pytest.mark.parametrize("kind,batch_size", [("framewise", 2), ("memory", 1)])
+@pytest.mark.parametrize(
+    "kind,batch_size",
+    [("sam2", 2), ("framewise", 2), ("memory", 1), ("multiview", 1)],
+)
 def test_cli_defaults(monkeypatch, kind, batch_size):
-    monkeypatch.setattr(sys, "argv", ["prediction", "--model", kind, "--model-checkpoint", "model.pt"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prediction", "predict", "--model", kind, "--model-checkpoint", "model.pt"],
+    )
     args = prediction.parse_args()
     assert args.batch_size == batch_size and args.prediction_dir_name == f"{kind}_prediction"
     assert args.prompt_mode == "mask" and not hasattr(args, "clip_length") and not hasattr(args, "clip_stride")
+    assert args.use_point_prompt is (kind == "sam2")
+
+
+def test_sam2_checkpoint_uses_original_checkpoint_loader():
+    sentinel = SimpleNamespace(image_size=768)
+    args = SimpleNamespace(
+        model="sam2",
+        model_checkpoint="sam2.pt",
+        device="cpu",
+        image_size=768,
+    )
+    with patch("inference.builder.build_sam2_modified_tiny", return_value=sentinel) as load:
+        assert build_model(args) is sentinel
+    load.assert_called_once_with(
+        checkpoint_path="sam2.pt",
+        device="cpu",
+        mode="eval",
+        image_size=768,
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,prompt_mode",
+    [("sam2", "point"), ("framewise", "none"), ("memory", "mask"), ("multiview", "mask")],
+)
+def test_single_entry_parses_evaluation_outputs(kind, prompt_mode):
+    args = prediction.parse_args([
+        "evaluate",
+        "--model",
+        kind,
+        "--model-checkpoint",
+        f"{kind}.pt",
+        "--output-dir",
+        "results",
+        "--save-predictions",
+        "--plot-curves",
+    ])
+    assert args.command == "evaluate"
+    assert args.prompt_mode == prompt_mode
+    assert args.save_predictions and args.plot_curves
 
 
 @pytest.mark.parametrize("extra", [["--batch-size", "2"], ["--batch-size", "0"], ["--clip-length", "8"], ["--clip-stride", "8"], ["--dataset", "dexycb"]])
 def test_cli_rejects_invalid_memory_args(monkeypatch, extra):
-    monkeypatch.setattr(sys, "argv", ["prediction", "--model", "memory", "--model-checkpoint", "model.pt", *extra])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prediction",
+            "predict",
+            "--model",
+            "memory",
+            "--model-checkpoint",
+            "model.pt",
+            *extra,
+        ],
+    )
     with pytest.raises(SystemExit) as error:
         prediction.parse_args()
     assert error.value.code == 2
@@ -114,6 +174,63 @@ def test_memory_entry_saves_all_stream_frames(tmp_path, prompt_mode):
             assert set(np.unique(result)) <= {0, 1, 2}
 
 
+def test_multiview_entry_uses_explicit_prompt_plan():
+    class MultiViewFrames(FrameDataset):
+        def __getitem__(self, index):
+            frame = super().__getitem__(index)
+            frame["original_left_mask"] = frame["left_mask"].clone()
+            frame["original_right_mask"] = frame["right_mask"].clone()
+            frame["dataset_root"] = self.prefix
+            return frame
+
+    dataset = MultiViewFrames(4, image_size=8, prefix="dataset")
+    dataset.streams = {
+        "dataset/sequence/cam-a": {
+            "dataset_name": "dataset",
+            "sample_indices": [0, 1],
+            "frame_numbers": [0, 1],
+        },
+        "dataset/sequence/cam-b": {
+            "dataset_name": "dataset",
+            "sample_indices": [2, 3],
+            "frame_numbers": [0, 1],
+        },
+    }
+    model = FakeMemoryModel()
+    model.set_multiview_fusion_enabled = lambda enabled: setattr(
+        model, "multiview_fusion_enabled", enabled
+    )
+    args = SimpleNamespace(
+        model="multiview",
+        device="cpu",
+        amp=False,
+        num_views=2,
+        prompt_mode="mask",
+        prompt_frame_indices=(0,),
+        correction_frame_indices=(1,),
+        correction_points=3,
+        add_correction_frames_as_cond=True,
+        max_condition_frames=4,
+        disable_multiview_fusion=False,
+        log_interval=50,
+        prediction_dir_name="multiview_prediction",
+        output_dir=None,
+    )
+
+    request = prediction.build_multiview_prompt_request(args)
+    assert request.prompt_frame_indices == (0,)
+    assert request.correction_frame_indices == (1,)
+    with patch.object(prediction, "save_prediction") as save:
+        assert prediction.run_prediction(model, dataset, args) == 4
+
+    assert save.call_count == 4
+    assert model.multiview_fusion_enabled
+    frame_zero = [call for call in model.calls if call["frame_idx"] == 0]
+    frame_one = [call for call in model.calls if call["frame_idx"] == 1]
+    assert all(call["prompted"] and not call["corrected"] for call in frame_zero)
+    assert all(call["corrected"] and call["correction_clicks"] == 3 for call in frame_one)
+
+
 @pytest.mark.parametrize("folder", ["rgb_undistort", "RGB", "color", "images", "camera"])
 def test_png_labels_overlap_and_output_path(tmp_path, folder):
     source = tmp_path / folder / "frame.jpg"
@@ -126,4 +243,4 @@ def test_png_labels_overlap_and_output_path(tmp_path, folder):
     )
     with Image.open(expected_path) as result:
         assert result.mode == "L"
-        np.testing.assert_array_equal(np.array(result), [[0, 1, 2], [2, 1, 1]])
+        np.testing.assert_array_equal(np.array(result), [[0, 2, 1], [1, 1, 1]])

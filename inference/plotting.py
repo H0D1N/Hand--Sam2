@@ -1,4 +1,3 @@
-import argparse
 import math
 from pathlib import Path
 
@@ -11,24 +10,6 @@ SUMMARY_FILENAME = "configuration_summary.csv"
 TEMPORAL_FILENAME = "temporal_metrics.csv"
 IOU_TICK_STEP = 0.05
 IOU_PADDING = 0.01
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Plot long-video evaluation curves")
-    parser.add_argument(
-        "--result-dir",
-        type=Path,
-        required=True,
-        help="Evaluation output directory",
-    )
-    parser.add_argument(
-        "--min-sequence-coverage",
-        type=float,
-        default=0.5,
-        help="Minimum sequence coverage retained in temporal plots",
-    )
-    parser.add_argument("--dpi", type=int, default=200)
-    return parser.parse_args()
 
 
 def load_results(result_dir):
@@ -175,53 +156,50 @@ def plot_budget(
     save_figure(fig, output_dir, stem, dpi)
 
 
-def main():
-    args = parse_args()
-    if not 0 <= args.min_sequence_coverage <= 1:
+def plot_results(result_dir, min_sequence_coverage=0.5, dpi=200):
+    """从评估 CSV 生成时序和 Prompt 预算 IoU 曲线。"""
+    result_dir = Path(result_dir)
+    if not 0 <= min_sequence_coverage <= 1:
         raise ValueError("--min-sequence-coverage must be in [0, 1]")
 
-    summary, temporal = load_results(args.result_dir)
+    summary, temporal = load_results(result_dir)
 
     plot_temporal(
         temporal,
         ["baseline", "fixed"],
-        args.result_dir,
+        result_dir,
         "temporal_fixed",
         "Fixed-interval GT-mask prompting over time",
-        args.min_sequence_coverage,
-        args.dpi,
+        min_sequence_coverage,
+        dpi,
     )
     plot_temporal(
         temporal,
         ["baseline", "adaptive"],
-        args.result_dir,
+        result_dir,
         "temporal_adaptive",
         "Adaptive point correction over time",
-        args.min_sequence_coverage,
-        args.dpi,
+        min_sequence_coverage,
+        dpi,
     )
     plot_budget(
         summary,
         "fixed",
         "ordinary_prompts_per_1000_hand_view_frames",
         "GT-mask prompts per 1,000 hand-view frames",
-        args.result_dir,
+        result_dir,
         "budget_fixed",
         "Fixed GT-mask prompting: prompt budget vs test IoU",
-        args.dpi,
+        dpi,
     )
     plot_budget(
         summary,
         "adaptive",
         "correction_clicks_per_1000_hand_view_frames",
         "Correction clicks per 1,000 hand-view frames",
-        args.result_dir,
+        result_dir,
         "budget_adaptive",
         "Adaptive point correction: click budget vs test IoU",
-        args.dpi,
+        dpi,
     )
-    print(f"Saved plots to: {args.result_dir}")
-
-
-if __name__ == "__main__":
-    main()
+    print(f"Saved plots to: {result_dir}")

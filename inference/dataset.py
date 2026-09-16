@@ -1,4 +1,4 @@
-"""推理 Dataset：memory 模式只要求每条视频流的第一帧有 mask。"""
+"""推理 Dataset：memory 只读首帧 mask，multiview 只读 PromptPlan 需要的 mask。"""
 
 import argparse
 import json
@@ -130,7 +130,7 @@ def _find_mask(image_path: Path, mask_dir: Path, config: dict) -> Path | None:
 
 
 class FirstFrameMaskMultiServerDataset(Dataset):
-    """读取全部 RGB，每条 dataset/sequence/camera 仅要求首帧有 mask。"""
+    """读取全部 RGB，只在指定的相对帧下标读取 mask。"""
 
     def __init__(
         self,
@@ -140,6 +140,7 @@ class FirstFrameMaskMultiServerDataset(Dataset):
         image_size: int = 1024,
         use_augmentation: bool = False,
         dataset_names: list[str] | None = None,
+        mask_frame_indices: tuple[int, ...] = (0,),
     ) -> None:
         if split != "val" or use_augmentation:
             raise ValueError("首帧 mask Dataset 仅用于无增强的 val 推理")
@@ -154,6 +155,9 @@ class FirstFrameMaskMultiServerDataset(Dataset):
         self.samples = []
         self.streams = {}
         self.mask_values = {}
+        self.mask_frame_indices = tuple(sorted(set(mask_frame_indices) | {0}))
+        if any(index < 0 for index in self.mask_frame_indices):
+            raise ValueError("mask_frame_indices 不能包含负数")
         catalog_path = self.dataset_root / "datasets.json"
         if not catalog_path.is_file():
             raise FileNotFoundError(f"找不到本地数据集配置: {catalog_path}")
@@ -236,12 +240,19 @@ class FirstFrameMaskMultiServerDataset(Dataset):
                     image_dir = sequence_dir / config["rgb_dir"].format(view=camera_name)
                     mask_dir = sequence_dir / config["mask_dir"].format(view=camera_name)
                     image_paths = _find_images(image_dir, config)
-                    first_mask_path = _find_mask(image_paths[0], mask_dir, config)
                     stream_id = f"{dataset_name}/{sequence_dir.name}/{camera_name}"
                     sample_indices = []
                     frame_numbers = []
 
                     for frame_idx, image_path in enumerate(image_paths):
+                        mask_path = None
+                        if frame_idx in self.mask_frame_indices:
+                            mask_path = _find_mask(image_path, mask_dir, config)
+                            if mask_path is None:
+                                raise ValueError(
+                                    f"{stream_id} 的 frame_index={frame_idx} "
+                                    "被 PromptPlan 使用，但找不到 mask"
+                                )
                         relative_image_path = image_path.relative_to(sequence_dir.parent)
                         sample_id = (
                             (Path(dataset_name) / relative_image_path)
@@ -253,7 +264,7 @@ class FirstFrameMaskMultiServerDataset(Dataset):
                         frame_numbers.append(int(image_path.stem))
                         self.samples.append({
                             "image_path": image_path,
-                            "mask_path": first_mask_path if frame_idx == 0 else None,
+                            "mask_path": mask_path,
                             "dataset_root": local_root,
                             "dataset_name": dataset_name,
                             "sample_id": sample_id,
@@ -296,7 +307,7 @@ class FirstFrameMaskMultiServerDataset(Dataset):
 
 
 class FirstFrameMaskDexYCBDataset(Dataset):
-    """DexYCB 推理只在每条 stream 的首帧读取 label_file。"""
+    """DexYCB 推理只在指定的相对帧下标读取 label_file。"""
 
     def __init__(
         self,
@@ -305,6 +316,7 @@ class FirstFrameMaskDexYCBDataset(Dataset):
         setup: str = "s0",
         image_size: int = 1024,
         use_augmentation: bool = False,
+        mask_frame_indices: tuple[int, ...] = (0,),
     ) -> None:
         if split != "val" or use_augmentation:
             raise ValueError("首帧 mask Dataset 仅用于无增强的 val 推理")
@@ -312,6 +324,9 @@ class FirstFrameMaskDexYCBDataset(Dataset):
         self.image_size = image_size
         self.dataset_name = "DexYCB"
         self.streams = {}
+        self.mask_frame_indices = tuple(sorted(set(mask_frame_indices) | {0}))
+        if any(index < 0 for index in self.mask_frame_indices):
+            raise ValueError("mask_frame_indices 不能包含负数")
         if not self.dataset_root.is_dir():
             raise FileNotFoundError(f"DexYCB 数据集目录不存在: {self.dataset_root}")
 
@@ -336,9 +351,11 @@ class FirstFrameMaskDexYCBDataset(Dataset):
             stream["sample_indices"].append(index)
             stream["frame_numbers"].append(int(image_path.stem.split("_")[-1]))
 
-        self.first_frame_indices = {
-            stream["sample_indices"][0]
+        self.mask_sample_indices = {
+            stream["sample_indices"][frame_index]
             for stream in self.streams.values()
+            for frame_index in self.mask_frame_indices
+            if frame_index < len(stream["sample_indices"])
         }
 
     def __getitem__(self, index: int) -> dict:
@@ -346,7 +363,7 @@ class FirstFrameMaskDexYCBDataset(Dataset):
         image_path = Path(sample["color_file"])
         mask_path = None
         left_mask_np = right_mask_np = None
-        if index in self.first_frame_indices:
+        if index in self.mask_sample_indices:
             mask_path = Path(sample["label_file"])
             with np.load(mask_path) as label:
                 hand_mask_np = (label["seg"] == 255).astype(np.uint8)
@@ -381,15 +398,21 @@ class FirstFrameMaskDexYCBDataset(Dataset):
 def build_frame_dataset(args: argparse.Namespace):
     datasets = []
     model_kind = getattr(args, "model", "framewise")
+    sparse_prompt_masks = model_kind in {"memory", "multiview"}
     multiserver_cls = (
         FirstFrameMaskMultiServerDataset
-        if model_kind == "memory"
+        if sparse_prompt_masks
         else MultiServerDualHandDataset
     )
     dexycb_cls = (
         FirstFrameMaskDexYCBDataset
-        if model_kind == "memory"
+        if sparse_prompt_masks
         else DexYCBDataset
+    )
+    sparse_mask_args = (
+        {"mask_frame_indices": tuple(getattr(args, "mask_frame_indices", (0,)))}
+        if sparse_prompt_masks
+        else {}
     )
     if args.dataset in {"multiserver", "mixed"}:
         datasets.append(multiserver_cls(
@@ -399,6 +422,7 @@ def build_frame_dataset(args: argparse.Namespace):
             image_size=args.image_size,
             use_augmentation=False,
             dataset_names=args.dataset_names,
+            **sparse_mask_args,
         ))
     if args.dataset in {"dexycb", "mixed"}:
         datasets.append(dexycb_cls(
@@ -407,6 +431,7 @@ def build_frame_dataset(args: argparse.Namespace):
             setup=args.dex_ycb_setup,
             image_size=args.image_size,
             use_augmentation=False,
+            **sparse_mask_args,
         ))
     return datasets[0] if len(datasets) == 1 else CombinedStreamDataset(datasets)
 
@@ -414,8 +439,8 @@ def build_frame_dataset(args: argparse.Namespace):
 def build_loader(dataset, args: argparse.Namespace, sample_indices=None) -> DataLoader:
     if sample_indices is not None:
         dataset = Subset(dataset, sample_indices)
-    if args.model == "memory" and args.batch_size != 1:
-        raise ValueError("memory 推理仅支持 batch_size=1")
+    if args.model in {"memory", "multiview"} and args.batch_size != 1:
+        raise ValueError("memory/multiview 推理仅支持 batch_size=1")
 
     loader_args = dict(
         dataset=dataset,

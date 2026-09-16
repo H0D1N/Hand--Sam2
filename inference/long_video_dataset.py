@@ -1,4 +1,4 @@
-"""把完整 GT 单帧数据组织成长视频或同步多视角长视频。"""
+"""把单帧数据组织成单视角或同步多视角长视频。"""
 
 from __future__ import annotations
 
@@ -294,7 +294,13 @@ class LongVideoDataset:
             "right_mask": torch.stack([frame["right_mask"] for frame in frames]),
             "original_left_mask": [frame["original_left_mask"] for frame in frames],
             "original_right_mask": [frame["original_right_mask"] for frame in frames],
+            "original_size": [
+                frame.get("original_size", tuple(frame["image"].shape[-2:]))
+                for frame in frames
+            ],
             "image_path": [frame["image_path"] for frame in frames],
+            "mask_path": [frame.get("mask_path") for frame in frames],
+            "dataset_root": [frame.get("dataset_root") for frame in frames],
         }
 
     def __len__(self) -> int:

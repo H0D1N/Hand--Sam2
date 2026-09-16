@@ -1,7 +1,10 @@
+import json
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
+from PIL import Image
 from torch.utils.data import Dataset, Subset
 
 from inference import dataset as prediction_data
@@ -34,6 +37,50 @@ class FrameDataset(Dataset):
             "image_path": f"{self.prefix}/rgb/{index * 3}.jpg", "mask_path": "unused",
             "sample_id": str(index), "dataset_name": self.prefix,
         }
+
+
+def test_multiview_dataset_loads_only_prompt_plan_masks(tmp_path):
+    config = {
+        "dataset_name": "dataset",
+        "data_root": "sources/dataset",
+        "sequence_glob": "*",
+        "view_glob": "cam-*",
+        "rgb_dir": "{view}/rgb",
+        "mask_dir": "{view}/mask",
+        "image_extensions": [".png"],
+        "mask_extensions": [".png"],
+        "mask_values": {"left": [1], "right": [2]},
+    }
+    (tmp_path / "datasets.json").write_text(
+        json.dumps({"datasets": [config]}), encoding="utf-8"
+    )
+    rgb_dir = tmp_path / "sources/dataset/sequence/cam-a/rgb"
+    mask_dir = tmp_path / "sources/dataset/sequence/cam-a/mask"
+    rgb_dir.mkdir(parents=True)
+    mask_dir.mkdir(parents=True)
+    for frame_index in range(3):
+        Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)).save(
+            rgb_dir / f"{frame_index}.png"
+        )
+    for frame_index in (0, 2):
+        Image.fromarray(np.ones((8, 8), dtype=np.uint8)).save(
+            mask_dir / f"{frame_index}.png"
+        )
+
+    dataset = prediction_data.FirstFrameMaskMultiServerDataset(
+        dataset_root=tmp_path,
+        test_seq_count=1,
+        image_size=16,
+        dataset_names=["dataset"],
+        mask_frame_indices=(0, 2),
+    )
+    assert [sample["mask_path"] is not None for sample in dataset.samples] == [
+        True,
+        False,
+        True,
+    ]
+    assert not dataset[1]["left_mask"].any()
+    assert dataset[2]["left_mask"].any()
 
 
 def test_memory_loader_preserves_complete_stream_order():

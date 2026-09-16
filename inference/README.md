@@ -1,8 +1,40 @@
-# Long-video evaluation
+# Inference and long-video evaluation
 
-This directory evaluates the memory and multiview checkpoints on complete,
-chronological, full-GT validation streams. It does not call the 8-frame training
-validation loop and does not use `inference/dataset.py`.
+This package contains image prediction, full-GT long-video evaluation, and IoU
+plotting. Prediction and evaluation share the same causal streaming runner;
+evaluation does not call the 8-frame training validation loop.
+
+There is only one command entry:
+
+```bash
+python3 -m inference.run_prediction {predict,evaluate} ...
+```
+
+`predict` accepts four checkpoint types: `sam2`, `framewise`, `memory`, and
+`multiview`. MultiView uses an explicit PromptPlan. For example, use GT masks on
+frames 0/80/160 and three correction clicks on frames 120/240:
+
+```bash
+python3 -m inference.run_prediction predict \
+  --model multiview \
+  --model-checkpoint outputs/multiview/experiment/checkpoints/best.pt \
+  --output-dir outputs/prediction \
+  --num-views 2 \
+  --prompt-mode mask \
+  --prompt-frame-indices 0 80 160 \
+  --correction-frame-indices 120 240 \
+  --correction-points 3
+```
+
+Only Prompt/correction frames need masks in `predict`; other frames require RGB
+only. `--prompt-mode point` converts the GT mask on ordinary Prompt frames into
+a center point. Correction frames use SAM2 positive/negative error points.
+
+`evaluate` also accepts all four model types and requires full-frame GT. SAM2 is
+evaluated with a point prompt on every frame; Framewise defaults to no prompt
+(`--prompt-mode point` is optional). These two single-frame models support the
+`baseline` strategy. Memory and MultiView additionally support the fixed and
+adaptive sweeps below.
 
 Three strategies are available:
 
@@ -46,7 +78,7 @@ result is recomputed and committed. `--amp` enables CUDA bfloat16 autocast.
 Memory example:
 
 ```bash
-python3 -m evaluation.run_evaluation \
+python3 -m inference.run_prediction evaluate \
   --model memory \
   --model-checkpoint outputs/memory/experiment/checkpoints/best.pt \
   --output-dir outputs/evaluation/memory \
@@ -59,7 +91,7 @@ python3 -m evaluation.run_evaluation \
 Multiview example:
 
 ```bash
-python3 -m evaluation.run_evaluation \
+python3 -m inference.run_prediction evaluate \
   --model multiview \
   --model-checkpoint outputs/multiview/experiment/checkpoints/best.pt \
   --output-dir outputs/evaluation/multiview \
@@ -85,14 +117,19 @@ The command writes:
 Frame 0 remains in the per-frame and temporal files, while aggregate configuration
 metrics exclude it by default (`--metric-start-frame 1`) because it is prompted.
 
-## Plotting
+## Prediction images and plotting
 
-Generate zoomed budget and temporal plots with the parameter and IoU written next
-to every budget point:
+Add both flags to the same evaluation command when CSV, prediction PNGs, and IoU
+curves are all needed:
 
 ```bash
-python3 -m evaluation.plot_evaluation \
-  --result-dir outputs/evaluation/memory
+python3 -m inference.run_prediction evaluate \
+  --model memory \
+  --model-checkpoint outputs/memory/experiment/checkpoints/best.pt \
+  --output-dir outputs/evaluation/memory \
+  --strategies baseline fixed adaptive \
+  --save-predictions \
+  --plot-curves
 ```
 
 The script writes PNG versions of `budget_fixed`, `budget_adaptive`,

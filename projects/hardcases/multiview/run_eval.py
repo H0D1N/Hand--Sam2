@@ -4,7 +4,7 @@ import logging
 
 import torch
 
-from evaluation.model_loader import load_evaluation_model
+from inference.builder import load_trained_model
 from projects.dual_hand_multiview.builder import build_sam2_multiview_dual_hand_memory_tiny
 from projects.dual_hand_multiview.losses import MultiViewDualHandMemoryLoss
 from projects.dual_hand_multiview.trainer import run_validation_epoch
@@ -53,7 +53,7 @@ def main() -> None:
     configure_runtime(device, use_tf32=not args.disable_tf32)
 
     if args.multiview_checkpoint is not None:
-        model = load_evaluation_model(
+        model = load_trained_model(
             "multiview", args.multiview_checkpoint, device
         )
     else:

@@ -15,14 +15,18 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 
-from evaluation.dataset import (
+from inference.long_video_dataset import (
     LongVideoDataset,
     LongVideoSequence,
     NaturalValMultiServerDataset,
     natural_sort_key,
 )
-from evaluation.streaming import EvaluationPolicy, LongVideoEvaluator
-from evaluation.run_evaluation import MetricAccumulator, build_policies
+from inference.streaming import (
+    EvaluationPolicy,
+    FramewiseLongVideoEvaluator,
+    LongVideoEvaluator,
+)
+from inference.evaluation import MetricAccumulator, build_policies
 
 
 IMAGE_SIZE = 8
@@ -74,7 +78,6 @@ class FakeMemoryModel(nn.Module):
             "left_high_res_features": features,
             "right_high_res_features": features,
         }
-
     def _prepare_backbone_features(self, backbone_out):
         num_views = backbone_out["left_high_res_features"][0].shape[0]
         feature = torch.zeros(1, num_views, 1)
@@ -131,6 +134,20 @@ class FakeMemoryModel(nn.Module):
             "maskmem_features": torch.zeros(gt_masks.shape[0], 1, 1, 1),
             "maskmem_pos_enc": [torch.zeros(gt_masks.shape[0], 1, 1, 1)],
             "obj_ptr": torch.zeros(gt_masks.shape[0], 1),
+        }
+
+
+class FakeFramewiseModel(nn.Module):
+    def forward_single_image(self, images, **kwargs):
+        mask = torch.full(
+            (images.size(0), 1, IMAGE_SIZE, IMAGE_SIZE),
+            -10.0,
+            device=images.device,
+        )
+        mask[:, :, 2:6, 2:6] = 10.0
+        return {
+            hand: {"high_res_masks": mask.clone()}
+            for hand in ("left", "right")
         }
 
 
@@ -304,6 +321,56 @@ def check_fixed_prompts_repeat_the_initial_prompt():
     assert [row["is_conditioning"] for row in left_rows] == [True, False, True]
 
 
+def check_explicit_prompt_plan_and_prediction_callback():
+    model = FakeMemoryModel()
+    evaluator = LongVideoEvaluator(
+        model=model,
+        model_type="memory",
+        device="cpu",
+        policy=EvaluationPolicy(
+            strategy="explicit",
+            prompt_mode="mask",
+            prompt_frame_indices=(0, 2),
+            correction_frame_indices=(1,),
+            correction_points=3,
+            add_correction_frames_as_cond=False,
+        ),
+    )
+    callbacks = []
+    rows = evaluator.evaluate_sequence(
+        ThreeFrameDataset(),
+        build_three_frame_sequence(),
+        prediction_callback=lambda **values: callbacks.append(values),
+        collect_metrics=False,
+    )
+
+    assert rows == [] and len(callbacks) == 3
+    left_calls = [call for call in model.calls if call["hand"] == "left"]
+    assert [call["prompted"] for call in left_calls] == [True, False, True]
+    assert [call["corrected"] for call in left_calls] == [False, True, False]
+    assert left_calls[1]["correction_clicks"] == 3
+
+
+def check_framewise_model_uses_long_video_metrics_format():
+    evaluator = FramewiseLongVideoEvaluator(
+        model=FakeFramewiseModel(),
+        model_type="framewise",
+        device="cpu",
+        prompt_mode="none",
+    )
+    callbacks = []
+    rows = evaluator.evaluate_sequence(
+        ThreeFrameDataset(),
+        build_three_frame_sequence(),
+        prediction_callback=lambda **values: callbacks.append(values),
+    )
+
+    assert len(rows) == 6 and len(callbacks) == 3
+    assert all(row["model"] == "framewise" for row in rows)
+    assert all(row["prompt_type"] == "none" for row in rows)
+    assert all(row["iou_after"] == 1.0 for row in rows)
+
+
 def check_multiview_adaptive_trigger_uses_all_views():
     model = FakeMemoryModel()
     evaluator = LongVideoEvaluator(
@@ -377,6 +444,8 @@ def main():
     check_adaptive_correction_is_decided_before_memory_commit()
     check_adaptive_correction_stops_at_safety_cap()
     check_fixed_prompts_repeat_the_initial_prompt()
+    check_explicit_prompt_plan_and_prediction_callback()
+    check_framewise_model_uses_long_video_metrics_format()
     check_multiview_adaptive_trigger_uses_all_views()
     check_strategy_parameter_sweep()
     print("Long-video evaluation: OK")

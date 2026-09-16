@@ -1,4 +1,4 @@
-"""逐帧因果执行长视频提示策略，并且只把最终结果写入 Memory。"""
+"""逐帧因果执行长视频 PromptPlan，并且只把最终结果写入 Memory。"""
 
 from __future__ import annotations
 
@@ -20,11 +20,14 @@ class EvaluationPolicy:
     iou_threshold: float = 0.5
     correction_points: int = 10
     max_condition_frames: int = 4
+    prompt_frame_indices: tuple[int, ...] = ()
+    correction_frame_indices: tuple[int, ...] = ()
+    add_correction_frames_as_cond: bool = True
 
     def __post_init__(self):
-        if self.strategy not in {"baseline", "fixed", "adaptive"}:
+        if self.strategy not in {"baseline", "fixed", "adaptive", "explicit"}:
             raise ValueError(f"未知策略: {self.strategy}")
-        if self.prompt_mode not in {"mask", "point"}:
+        if self.prompt_mode not in {"none", "mask", "point"}:
             raise ValueError(f"未知 prompt_mode: {self.prompt_mode}")
         if self.prompt_interval < 1:
             raise ValueError("prompt_interval 必须大于 0")
@@ -34,6 +37,12 @@ class EvaluationPolicy:
             raise ValueError("correction_points 必须大于 0")
         if self.max_condition_frames < 1:
             raise ValueError("max_condition_frames 必须大于 0")
+        if self.strategy == "explicit" and not self.prompt_frame_indices:
+            raise ValueError("explicit 策略至少需要一个 Prompt 帧")
+        if any(index < 0 for index in self.prompt_frame_indices):
+            raise ValueError("Prompt 帧下标不能小于 0")
+        if any(index < 0 for index in self.correction_frame_indices):
+            raise ValueError("纠错帧下标不能小于 0")
 
     @property
     def configuration(self) -> str:
@@ -42,6 +51,8 @@ class EvaluationPolicy:
         if self.strategy == "adaptive":
             threshold = format(self.iou_threshold, "g").replace(".", "p")
             return f"adaptive_iou_{threshold}"
+        if self.strategy == "explicit":
+            return "explicit_prompt_plan"
         return "baseline"
 
 
@@ -120,6 +131,8 @@ class LongVideoEvaluator:
             self.model.num_correction_pt_per_frame = policy.correction_points
 
     def _is_prompt_frame(self, frame_index: int) -> bool:
+        if self.policy.strategy == "explicit":
+            return frame_index in self.policy.prompt_frame_indices
         return frame_index == 0 or (
             self.policy.strategy == "fixed"
             and frame_index % self.policy.prompt_interval == 0
@@ -176,7 +189,13 @@ class LongVideoEvaluator:
         )
 
     @torch.inference_mode()
-    def evaluate_sequence(self, dataset, sequence) -> list[dict]:
+    def evaluate_sequence(
+        self,
+        dataset,
+        sequence,
+        prediction_callback=None,
+        collect_metrics=True,
+    ) -> list[dict]:
         num_views = len(sequence.view_names)
         if self.model_type == "memory" and num_views != 1:
             raise ValueError("memory baseline 每次只能评估一个视角")
@@ -192,6 +211,20 @@ class LongVideoEvaluator:
                 for hand in ("left", "right")
             }
             is_prompt_frame = self._is_prompt_frame(frame_index)
+            is_explicit_correction = (
+                self.policy.strategy == "explicit"
+                and frame_index in self.policy.correction_frame_indices
+            )
+            if (
+                self.policy.strategy == "explicit"
+                and (is_prompt_frame or is_explicit_correction)
+                and any(path is None for path in frame.get("mask_path", ()))
+            ):
+                raise ValueError(
+                    f"{sequence.evaluation_id} 的 frame_index={frame_index} "
+                    "被设为提示/纠错帧，但至少一个视角没有 mask"
+                )
+            frame_predictions = {}
 
             with torch.autocast(
                 device_type=self.device.type,
@@ -214,7 +247,7 @@ class LongVideoEvaluator:
                     if is_prompt_frame:
                         if self.policy.prompt_mode == "mask":
                             mask_inputs = gt_masks
-                        else:
+                        elif self.policy.prompt_mode == "point":
                             point_inputs = build_center_point_prompt(gt_masks)
 
                     corrected = False
@@ -249,8 +282,11 @@ class LongVideoEvaluator:
                         trial_out = None
                         before_ious = None
 
+                    if is_explicit_correction:
+                        corrected = True
+
                     stop_correction = None
-                    if corrected:
+                    if corrected and self.policy.strategy == "adaptive":
                         def stop_correction(logits):
                             return min(_original_iou_per_view(
                                 logits, original_masks
@@ -274,11 +310,14 @@ class LongVideoEvaluator:
                         run_mem_encoder=True,
                         num_views=num_views,
                     )
-                    after_ious = _original_iou_per_view(
-                        current_out["pred_masks_high_res"], original_masks
-                    )
-                    if before_ious is None:
-                        before_ious = after_ious
+                    frame_predictions[hand] = current_out["pred_masks_high_res"]
+                    after_ious = None
+                    if collect_metrics:
+                        after_ious = _original_iou_per_view(
+                            current_out["pred_masks_high_res"], original_masks
+                        )
+                        if before_ious is None:
+                            before_ious = after_ious
                     correction_clicks = (
                         len(current_out["multistep_point_inputs"]) - 1
                         if corrected else 0
@@ -286,7 +325,10 @@ class LongVideoEvaluator:
 
                     memory_kind = (
                         "cond_frame_outputs"
-                        if is_prompt_frame or corrected
+                        if is_prompt_frame or (
+                            corrected
+                            and self.policy.add_correction_frames_as_cond
+                        )
                         else "non_cond_frame_outputs"
                     )
                     output_dict[hand][memory_kind][frame_index] = (
@@ -300,43 +342,55 @@ class LongVideoEvaluator:
                     else:
                         prompt_type = "none"
 
-                    for view_index, view_name in enumerate(sequence.view_names):
-                        rows.append({
-                            "model": self.model_type,
-                            "strategy": self.policy.strategy,
-                            "configuration": self.policy.configuration,
-                            "prompt_mode": self.policy.prompt_mode,
-                            "prompt_interval": (
-                                self.policy.prompt_interval
-                                if self.policy.strategy == "fixed" else None
-                            ),
-                            "iou_threshold": (
-                                self.policy.iou_threshold
-                                if self.policy.strategy == "adaptive" else None
-                            ),
-                            "correction_points": (
-                                self.policy.correction_points
-                                if self.policy.strategy == "adaptive" else None
-                            ),
-                            "correction_clicks": correction_clicks,
-                            "dataset": sequence.dataset_name,
-                            "sequence_id": sequence.sequence_id,
-                            "evaluation_id": sequence.evaluation_id,
-                            "segment_index": sequence.segment_index,
-                            "view": view_name,
-                            "frame_index": frame_index,
-                            "frame_number": sequence.frame_numbers[frame_index],
-                            "hand": hand,
-                            "prompt_type": prompt_type,
-                            "is_conditioning": is_prompt_frame or corrected,
-                            "corrected": corrected,
-                            "iou_before": before_ious[view_index],
-                            "iou_after": after_ious[view_index],
-                            "gt_present": bool(original_masks[view_index].any().item()),
-                            "image_path": frame["image_path"][view_index],
-                        })
+                    if collect_metrics:
+                        for view_index, view_name in enumerate(sequence.view_names):
+                            rows.append({
+                                "model": self.model_type,
+                                "strategy": self.policy.strategy,
+                                "configuration": self.policy.configuration,
+                                "prompt_mode": self.policy.prompt_mode,
+                                "prompt_interval": (
+                                    self.policy.prompt_interval
+                                    if self.policy.strategy == "fixed" else None
+                                ),
+                                "iou_threshold": (
+                                    self.policy.iou_threshold
+                                    if self.policy.strategy == "adaptive" else None
+                                ),
+                                "correction_points": (
+                                    self.policy.correction_points
+                                    if self.policy.strategy in {"adaptive", "explicit"}
+                                    else None
+                                ),
+                                "correction_clicks": correction_clicks,
+                                "dataset": sequence.dataset_name,
+                                "sequence_id": sequence.sequence_id,
+                                "evaluation_id": sequence.evaluation_id,
+                                "segment_index": sequence.segment_index,
+                                "view": view_name,
+                                "frame_index": frame_index,
+                                "frame_number": sequence.frame_numbers[frame_index],
+                                "hand": hand,
+                                "prompt_type": prompt_type,
+                                "is_conditioning": memory_kind == "cond_frame_outputs",
+                                "corrected": corrected,
+                                "iou_before": before_ious[view_index],
+                                "iou_after": after_ious[view_index],
+                                "gt_present": bool(
+                                    original_masks[view_index].any().item()
+                                ),
+                                "image_path": frame["image_path"][view_index],
+                            })
 
                     del trial_out, current_out
+
+            if prediction_callback is not None:
+                prediction_callback(
+                    sequence=sequence,
+                    frame_index=frame_index,
+                    frame=frame,
+                    predictions=frame_predictions,
+                )
 
             for hand in ("left", "right"):
                 cond_bank = output_dict[hand]["cond_frame_outputs"]
@@ -349,7 +403,15 @@ class LongVideoEvaluator:
                     num_frames=sequence.num_frames,
                 )
 
-            del frame, images, gt_masks_by_hand, backbone_out, vision_feats, vision_pos
+            del (
+                frame,
+                images,
+                gt_masks_by_hand,
+                backbone_out,
+                vision_feats,
+                vision_pos,
+                frame_predictions,
+            )
 
             if (
                 (frame_index + 1) % self.log_interval == 0
@@ -358,6 +420,135 @@ class LongVideoEvaluator:
                 logging.info(
                     "%s | %s | %d/%d frames",
                     self.policy.configuration,
+                    sequence.evaluation_id,
+                    frame_index + 1,
+                    sequence.num_frames,
+                )
+
+        return rows
+
+
+class FramewiseLongVideoEvaluator:
+    """把 SAM2/Framewise 单帧模型放到同一长视频指标格式中。"""
+
+    def __init__(
+        self,
+        model,
+        model_type: str,
+        device,
+        prompt_mode: str,
+        amp=False,
+        log_interval=50,
+    ):
+        if model_type not in {"sam2", "framewise"}:
+            raise ValueError(f"未知单帧模型: {model_type}")
+        if prompt_mode not in {"none", "point"}:
+            raise ValueError("单帧模型只支持 none/point Prompt")
+        self.model = model
+        self.model_type = model_type
+        self.device = torch.device(device)
+        self.prompt_mode = prompt_mode
+        self.amp = bool(amp and self.device.type == "cuda")
+        self.log_interval = max(int(log_interval), 1)
+
+    @torch.inference_mode()
+    def evaluate_sequence(
+        self,
+        dataset,
+        sequence,
+        prediction_callback=None,
+        collect_metrics=True,
+    ) -> list[dict]:
+        if len(sequence.view_names) != 1:
+            raise ValueError("单帧模型每次只能评估一个视角")
+
+        rows = []
+        for frame_index in range(sequence.num_frames):
+            frame = dataset.load_frame(sequence, frame_index)
+            images = frame["image"].to(self.device, non_blocking=True)
+            gt_masks = {
+                hand: frame[f"{hand}_mask"].to(
+                    self.device, non_blocking=True
+                )
+                for hand in ("left", "right")
+            }
+            point_inputs = {
+                hand: (
+                    build_center_point_prompt(gt_masks[hand])
+                    if self.prompt_mode == "point"
+                    else None
+                )
+                for hand in ("left", "right")
+            }
+
+            with torch.autocast(
+                device_type=self.device.type,
+                dtype=torch.bfloat16,
+                enabled=self.amp,
+            ):
+                outputs = self.model.forward_single_image(
+                    images=images,
+                    left_point_inputs=point_inputs["left"],
+                    right_point_inputs=point_inputs["right"],
+                    mask_inputs=None,
+                    multimask_output=False,
+                )
+
+            predictions = {
+                hand: outputs[hand]["high_res_masks"]
+                for hand in ("left", "right")
+            }
+            if collect_metrics:
+                for hand in ("left", "right"):
+                    original_masks = frame[f"original_{hand}_mask"]
+                    ious = _original_iou_per_view(
+                        predictions[hand], original_masks
+                    )
+                    rows.append({
+                        "model": self.model_type,
+                        "strategy": "baseline",
+                        "configuration": "baseline",
+                        "prompt_mode": self.prompt_mode,
+                        "prompt_interval": None,
+                        "iou_threshold": None,
+                        "correction_points": None,
+                        "correction_clicks": 0,
+                        "dataset": sequence.dataset_name,
+                        "sequence_id": sequence.sequence_id,
+                        "evaluation_id": sequence.evaluation_id,
+                        "segment_index": sequence.segment_index,
+                        "view": sequence.view_names[0],
+                        "frame_index": frame_index,
+                        "frame_number": sequence.frame_numbers[frame_index],
+                        "hand": hand,
+                        "prompt_type": self.prompt_mode,
+                        "is_conditioning": False,
+                        "corrected": False,
+                        "iou_before": ious[0],
+                        "iou_after": ious[0],
+                        "gt_present": bool(
+                            original_masks[0].any().item()
+                        ),
+                        "image_path": frame["image_path"][0],
+                    })
+
+            if prediction_callback is not None:
+                prediction_callback(
+                    sequence=sequence,
+                    frame_index=frame_index,
+                    frame=frame,
+                    predictions=predictions,
+                )
+
+            del frame, images, gt_masks, point_inputs, outputs, predictions
+
+            if (
+                (frame_index + 1) % self.log_interval == 0
+                or frame_index + 1 == sequence.num_frames
+            ):
+                logging.info(
+                    "%s | %s | %d/%d frames",
+                    self.model_type,
                     sequence.evaluation_id,
                     frame_index + 1,
                     sequence.num_frames,

@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
 import csv
 import logging
 from pathlib import Path
 
 import torch
 
-from evaluation.dataset import LongVideoDataset, build_full_gt_frame_dataset
-from evaluation.model_loader import load_evaluation_model
-from evaluation.streaming import EvaluationPolicy, LongVideoEvaluator
+from inference.long_video_dataset import LongVideoDataset, build_full_gt_frame_dataset
+from inference.builder import load_trained_model
+from inference.output import save_prediction
+from inference.streaming import (
+    EvaluationPolicy,
+    FramewiseLongVideoEvaluator,
+    LongVideoEvaluator,
+)
+from projects.framewise_sam2_modified.builder import build_sam2_modified_tiny
 from projects.framewise_sam2_modified.utils import (
     configure_runtime,
     dump_json,
@@ -238,12 +245,19 @@ def build_policies(args) -> list[EvaluationPolicy]:
     return policies
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Evaluate prompt policies causally on full-GT long videos."
+def add_evaluation_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--model",
+        choices=("sam2", "framewise", "memory", "multiview"),
+        required=True,
     )
-    parser.add_argument("--model", choices=("memory", "multiview"), required=True)
     parser.add_argument("--model-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=768,
+        help="仅原始 SAM2 checkpoint 需要。",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--strategies",
@@ -251,7 +265,11 @@ def parse_args() -> argparse.Namespace:
         choices=("baseline", "fixed", "adaptive"),
         default=("baseline",),
     )
-    parser.add_argument("--prompt-mode", choices=("mask", "point"), default="mask")
+    parser.add_argument(
+        "--prompt-mode",
+        choices=("none", "mask", "point"),
+        help="默认：SAM2=point，Framewise=none，Memory/MultiView=mask。",
+    )
     parser.add_argument("--fixed-intervals", type=int, nargs="+", default=(80,))
     parser.add_argument(
         "--adaptive-thresholds", type=float, nargs="+", default=(0.5,)
@@ -289,12 +307,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amp", action="store_true")
     parser.add_argument("--disable-tf32", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--save-predictions",
+        action="store_true",
+        help="同时把每个评估配置的最终预测保存为 PNG。",
+    )
+    parser.add_argument(
+        "--plot-curves",
+        action="store_true",
+        help="评估完成后立即生成 IoU PNG 曲线。",
+    )
+    parser.add_argument("--min-sequence-coverage", type=float, default=0.5)
+    parser.add_argument("--plot-dpi", type=int, default=200)
 
+
+def validate_evaluation_args(args, parser: argparse.ArgumentParser) -> None:
     if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
         parser.error("--dataset dexycb/mixed 需要提供 --dex-ycb-root")
     if args.model == "multiview" and args.num_views < 2:
         parser.error("multiview 模型要求 --num-views 至少为 2")
+    if args.prompt_mode is None:
+        args.prompt_mode = {
+            "sam2": "point",
+            "framewise": "none",
+            "memory": "mask",
+            "multiview": "mask",
+        }[args.model]
+    if args.model == "sam2" and args.prompt_mode != "point":
+        parser.error("sam2 评估需要 --prompt-mode point")
+    if args.model == "framewise" and args.prompt_mode not in {"none", "point"}:
+        parser.error("framewise 评估只支持 --prompt-mode none/point")
+    if args.model in {"memory", "multiview"} and args.prompt_mode == "none":
+        parser.error("memory/multiview 评估需要 mask 或 point Prompt")
+    if args.model in {"sam2", "framewise"} and tuple(args.strategies) != (
+        "baseline",
+    ):
+        parser.error("sam2/framewise 只支持 baseline 逐帧评估")
+    if args.image_size <= 0 or args.image_size % 16 != 0:
+        parser.error("--image-size 必须为 16 的正整数倍")
     if any(interval < 1 for interval in args.fixed_intervals):
         parser.error("--fixed-intervals 必须全部大于 0")
     if any(
@@ -314,11 +364,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-sequences 必须大于 0")
     if args.log_interval < 1:
         parser.error("--log-interval 必须大于 0")
-    return args
+    if not 0.0 <= args.min_sequence_coverage <= 1.0:
+        parser.error("--min-sequence-coverage 必须位于 [0, 1]")
+    if args.plot_dpi < 1:
+        parser.error("--plot-dpi 必须大于 0")
 
 
-def main() -> None:
-    args = parse_args()
+def run_evaluation(args) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
@@ -328,7 +380,15 @@ def main() -> None:
     device = torch.device(args.device)
     configure_runtime(device, use_tf32=not args.disable_tf32)
 
-    model = load_evaluation_model(args.model, args.model_checkpoint, device)
+    if args.model == "sam2":
+        model = build_sam2_modified_tiny(
+            checkpoint_path=args.model_checkpoint,
+            device=device,
+            mode="eval",
+            image_size=args.image_size,
+        )
+    else:
+        model = load_trained_model(args.model, args.model_checkpoint, device)
     frame_dataset = build_full_gt_frame_dataset(
         dataset_mode=args.dataset_mode,
         image_size=model.image_size,
@@ -339,7 +399,7 @@ def main() -> None:
     )
     dataset = LongVideoDataset(
         frame_dataset,
-        num_views=1 if args.model == "memory" else args.num_views,
+        num_views=args.num_views if args.model == "multiview" else 1,
         min_sequence_length=args.min_sequence_length,
     )
     sequences = dataset.sequences
@@ -359,30 +419,77 @@ def main() -> None:
     if not policies:
         raise ValueError("没有生成任何评估配置")
 
+    view_sets_by_sequence = defaultdict(set)
+    for sequence in sequences:
+        view_sets_by_sequence[sequence.sequence_id].add(sequence.view_names)
+
     overall = {}
     per_sequence = {}
     summary_rows = []
     temporal_rows = []
+    saved_predictions = 0
     csv_path = args.output_dir / "per_frame_metrics.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
 
         for policy in policies:
-            evaluator = LongVideoEvaluator(
-                model=model,
-                model_type=args.model,
-                device=device,
-                policy=policy,
-                amp=args.amp,
-                log_interval=args.log_interval,
-            )
+            if args.model in {"sam2", "framewise"}:
+                evaluator = FramewiseLongVideoEvaluator(
+                    model=model,
+                    model_type=args.model,
+                    device=device,
+                    prompt_mode=args.prompt_mode,
+                    amp=args.amp,
+                    log_interval=args.log_interval,
+                )
+            else:
+                evaluator = LongVideoEvaluator(
+                    model=model,
+                    model_type=args.model,
+                    device=device,
+                    policy=policy,
+                    amp=args.amp,
+                    log_interval=args.log_interval,
+                )
             strategy_metrics = MetricAccumulator(args.metric_start_frame)
             strategy_sequences = {}
             temporal_metrics = {}
 
             for sequence_index, sequence in enumerate(sequences, start=1):
-                rows = evaluator.evaluate_sequence(dataset, sequence)
+                prediction_callback = None
+                if args.save_predictions:
+                    prediction_dir_name = "prediction"
+                    if len(view_sets_by_sequence[sequence.sequence_id]) > 1:
+                        prediction_dir_name += "/" + "+".join(sequence.view_names)
+
+                    def prediction_callback(*, frame, predictions, **_):
+                        nonlocal saved_predictions
+                        for view_index in range(len(sequence.view_names)):
+                            save_prediction(
+                                image_path=frame["image_path"][view_index],
+                                original_size=frame["original_size"][view_index],
+                                left_logits=predictions["left"][
+                                    view_index:view_index + 1
+                                ],
+                                right_logits=predictions["right"][
+                                    view_index:view_index + 1
+                                ],
+                                prediction_dir_name=prediction_dir_name,
+                                output_dir=(
+                                    args.output_dir
+                                    / "predictions"
+                                    / policy.configuration
+                                ),
+                                dataset_root=frame["dataset_root"][view_index],
+                            )
+                            saved_predictions += 1
+
+                rows = evaluator.evaluate_sequence(
+                    dataset,
+                    sequence,
+                    prediction_callback=prediction_callback,
+                )
                 sequence_metrics = MetricAccumulator(args.metric_start_frame)
                 for row in rows:
                     writer.writerow(row)
@@ -447,7 +554,7 @@ def main() -> None:
             "correction_points": args.correction_points,
             "max_condition_frames": args.max_condition_frames,
             "metric_start_frame": args.metric_start_frame,
-            "num_views": 1 if args.model == "memory" else args.num_views,
+            "num_views": args.num_views if args.model == "multiview" else 1,
             "num_sequences": len(sequences),
         },
         "overall": overall,
@@ -458,7 +565,17 @@ def main() -> None:
     logging.info("Saved configuration summary: %s", summary_csv_path)
     logging.info("Saved temporal metrics: %s", temporal_csv_path)
     logging.info("Saved summary: %s", args.output_dir / "summary.json")
+    if args.save_predictions:
+        logging.info(
+            "Saved predictions: %d images under %s",
+            saved_predictions,
+            args.output_dir / "predictions",
+        )
+    if args.plot_curves:
+        from inference.plotting import plot_results
 
-
-if __name__ == "__main__":
-    main()
+        plot_results(
+            args.output_dir,
+            min_sequence_coverage=args.min_sequence_coverage,
+            dpi=args.plot_dpi,
+        )
