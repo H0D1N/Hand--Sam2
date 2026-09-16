@@ -315,6 +315,7 @@ def build_full_gt_frame_dataset(
     dataset_names,
     test_seq_count: int,
     dex_ycb_root,
+    dex_ycb_setup: str = "s0",
 ):
     """使用训练数据读取器的 val split，但不再切成固定长度 Clip。"""
     datasets = []
@@ -331,7 +332,7 @@ def build_full_gt_frame_dataset(
         datasets.append(DexYCBDataset(
             dataset_root=dex_ycb_root,
             split="val",
-            setup="s0",
+            setup=dex_ycb_setup,
             image_size=image_size,
             use_augmentation=False,
         ))

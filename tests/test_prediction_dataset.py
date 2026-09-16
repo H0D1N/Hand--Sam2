@@ -58,11 +58,11 @@ def test_multiview_dataset_loads_only_prompt_plan_masks(tmp_path):
     mask_dir = tmp_path / "sources/dataset/sequence/cam-a/mask"
     rgb_dir.mkdir(parents=True)
     mask_dir.mkdir(parents=True)
-    for frame_index in range(3):
+    for frame_index in (0, 1, 3):
         Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)).save(
             rgb_dir / f"{frame_index}.png"
         )
-    for frame_index in (0, 2):
+    for frame_index in (0, 3):
         Image.fromarray(np.ones((8, 8), dtype=np.uint8)).save(
             mask_dir / f"{frame_index}.png"
         )
@@ -72,7 +72,8 @@ def test_multiview_dataset_loads_only_prompt_plan_masks(tmp_path):
         test_seq_count=1,
         image_size=16,
         dataset_names=["dataset"],
-        mask_frame_indices=(0, 2),
+        mask_frame_indices=(0,),
+        mask_frame_interval=2,
     )
     assert [sample["mask_path"] is not None for sample in dataset.samples] == [
         True,

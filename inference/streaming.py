@@ -215,10 +215,11 @@ class LongVideoEvaluator:
                 self.policy.strategy == "explicit"
                 and frame_index in self.policy.correction_frame_indices
             )
+            mask_paths = frame.get("mask_path")
             if (
-                self.policy.strategy == "explicit"
-                and (is_prompt_frame or is_explicit_correction)
-                and any(path is None for path in frame.get("mask_path", ()))
+                (is_prompt_frame or is_explicit_correction)
+                and mask_paths is not None
+                and any(path is None for path in mask_paths)
             ):
                 raise ValueError(
                     f"{sequence.evaluation_id} 的 frame_index={frame_index} "

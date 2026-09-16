@@ -141,6 +141,7 @@ class FirstFrameMaskMultiServerDataset(Dataset):
         use_augmentation: bool = False,
         dataset_names: list[str] | None = None,
         mask_frame_indices: tuple[int, ...] = (0,),
+        mask_frame_interval: int | None = None,
     ) -> None:
         if split != "val" or use_augmentation:
             raise ValueError("首帧 mask Dataset 仅用于无增强的 val 推理")
@@ -158,6 +159,9 @@ class FirstFrameMaskMultiServerDataset(Dataset):
         self.mask_frame_indices = tuple(sorted(set(mask_frame_indices) | {0}))
         if any(index < 0 for index in self.mask_frame_indices):
             raise ValueError("mask_frame_indices 不能包含负数")
+        self.mask_frame_interval = mask_frame_interval
+        if mask_frame_interval is not None and mask_frame_interval < 1:
+            raise ValueError("mask_frame_interval 必须大于 0")
         catalog_path = self.dataset_root / "datasets.json"
         if not catalog_path.is_file():
             raise FileNotFoundError(f"找不到本地数据集配置: {catalog_path}")
@@ -243,14 +247,29 @@ class FirstFrameMaskMultiServerDataset(Dataset):
                     stream_id = f"{dataset_name}/{sequence_dir.name}/{camera_name}"
                     sample_indices = []
                     frame_numbers = []
+                    previous_frame_number = None
+                    segment_frame_index = 0
 
-                    for frame_idx, image_path in enumerate(image_paths):
+                    for image_path in image_paths:
+                        frame_number = int(image_path.stem)
+                        if (
+                            previous_frame_number is None
+                            or frame_number != previous_frame_number + 1
+                        ):
+                            segment_frame_index = 0
                         mask_path = None
-                        if frame_idx in self.mask_frame_indices:
+                        if (
+                            segment_frame_index in self.mask_frame_indices
+                            or (
+                                self.mask_frame_interval is not None
+                                and segment_frame_index
+                                % self.mask_frame_interval == 0
+                            )
+                        ):
                             mask_path = _find_mask(image_path, mask_dir, config)
                             if mask_path is None:
                                 raise ValueError(
-                                    f"{stream_id} 的 frame_index={frame_idx} "
+                                    f"{stream_id} 的 frame={frame_number} "
                                     "被 PromptPlan 使用，但找不到 mask"
                                 )
                         relative_image_path = image_path.relative_to(sequence_dir.parent)
@@ -261,7 +280,7 @@ class FirstFrameMaskMultiServerDataset(Dataset):
                             .replace("/", "__")
                         )
                         sample_indices.append(len(self.samples))
-                        frame_numbers.append(int(image_path.stem))
+                        frame_numbers.append(frame_number)
                         self.samples.append({
                             "image_path": image_path,
                             "mask_path": mask_path,
@@ -269,6 +288,8 @@ class FirstFrameMaskMultiServerDataset(Dataset):
                             "dataset_name": dataset_name,
                             "sample_id": sample_id,
                         })
+                        previous_frame_number = frame_number
+                        segment_frame_index += 1
 
                     self.streams[stream_id] = {
                         "dataset_name": dataset_name,
@@ -317,6 +338,7 @@ class FirstFrameMaskDexYCBDataset(Dataset):
         image_size: int = 1024,
         use_augmentation: bool = False,
         mask_frame_indices: tuple[int, ...] = (0,),
+        mask_frame_interval: int | None = None,
     ) -> None:
         if split != "val" or use_augmentation:
             raise ValueError("首帧 mask Dataset 仅用于无增强的 val 推理")
@@ -327,6 +349,9 @@ class FirstFrameMaskDexYCBDataset(Dataset):
         self.mask_frame_indices = tuple(sorted(set(mask_frame_indices) | {0}))
         if any(index < 0 for index in self.mask_frame_indices):
             raise ValueError("mask_frame_indices 不能包含负数")
+        self.mask_frame_interval = mask_frame_interval
+        if mask_frame_interval is not None and mask_frame_interval < 1:
+            raise ValueError("mask_frame_interval 必须大于 0")
         if not self.dataset_root.is_dir():
             raise FileNotFoundError(f"DexYCB 数据集目录不存在: {self.dataset_root}")
 
@@ -351,12 +376,29 @@ class FirstFrameMaskDexYCBDataset(Dataset):
             stream["sample_indices"].append(index)
             stream["frame_numbers"].append(int(image_path.stem.split("_")[-1]))
 
-        self.mask_sample_indices = {
-            stream["sample_indices"][frame_index]
-            for stream in self.streams.values()
-            for frame_index in self.mask_frame_indices
-            if frame_index < len(stream["sample_indices"])
-        }
+        self.mask_sample_indices = set()
+        for stream in self.streams.values():
+            previous_frame_number = None
+            segment_frame_index = 0
+            for sample_index, frame_number in zip(
+                stream["sample_indices"], stream["frame_numbers"]
+            ):
+                if (
+                    previous_frame_number is None
+                    or frame_number != previous_frame_number + 1
+                ):
+                    segment_frame_index = 0
+                if (
+                    segment_frame_index in self.mask_frame_indices
+                    or (
+                        self.mask_frame_interval is not None
+                        and segment_frame_index
+                        % self.mask_frame_interval == 0
+                    )
+                ):
+                    self.mask_sample_indices.add(sample_index)
+                previous_frame_number = frame_number
+                segment_frame_index += 1
 
     def __getitem__(self, index: int) -> dict:
         sample = self.official_dataset[self.samples[index]]
@@ -410,7 +452,12 @@ def build_frame_dataset(args: argparse.Namespace):
         else DexYCBDataset
     )
     sparse_mask_args = (
-        {"mask_frame_indices": tuple(getattr(args, "mask_frame_indices", (0,)))}
+        {
+            "mask_frame_indices": tuple(
+                getattr(args, "mask_frame_indices", (0,))
+            ),
+            "mask_frame_interval": getattr(args, "mask_frame_interval", None),
+        }
         if sparse_prompt_masks
         else {}
     )

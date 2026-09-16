@@ -29,7 +29,9 @@ def test_cli_defaults(monkeypatch, kind, batch_size):
     )
     args = prediction.parse_args()
     assert args.batch_size == batch_size and args.prediction_dir_name == f"{kind}_prediction"
-    assert args.prompt_mode == "mask" and not hasattr(args, "clip_length") and not hasattr(args, "clip_stride")
+    assert args.prompt_mode == "mask" and args.strategy == "baseline"
+    assert args.prompt_interval == 200
+    assert not hasattr(args, "clip_length") and not hasattr(args, "clip_stride")
     assert args.use_point_prompt is (kind == "sam2")
 
 
@@ -145,36 +147,50 @@ def test_strict_checkpoint_and_framewise_outputs(tmp_path, kind):
         build_model(args)
 
 
-@pytest.mark.parametrize("prompt_mode", ["mask", "auto", "point"])
-def test_memory_entry_saves_all_stream_frames(tmp_path, prompt_mode):
-    model = create_sam2_modified_tiny(image_size=128, model_cls=SAM2DualHandVideoPredictor).eval()
-    dataset = FrameDataset(4, prefix=str(tmp_path / "video"))
-    dataset.streams = {"first": {"sample_indices": [2, 0, 3]}, "second": {"sample_indices": [1]}}
-    args = SimpleNamespace(model="memory", batch_size=1, num_workers=0, device="cpu", amp=False,
-                           prompt_mode=prompt_mode, log_interval=2, prediction_dir_name="memory_prediction")
-    with patch.object(model, "track_step", wraps=model.track_step) as track, \
-         patch.object(prediction, "save_prediction", wraps=prediction.save_prediction) as save:
-        assert prediction.run_prediction(model, dataset, args) == 4
-    assert dataset.reads == [2, 0, 3, 1]
-    assert [call.kwargs["image_path"] for call in save.call_args_list] == [f"{dataset.prefix}/rgb/{i * 3}.jpg" for i in [2, 0, 3, 1]]
-    assert [call.kwargs["frame_idx"] for call in track.call_args_list] == [0, 0, 1, 1, 2, 2, 0, 0]
-    for call in track.call_args_list:
-        kwargs = call.kwargs
-        assert kwargs["gt_masks"] is None and kwargs["frames_to_add_correction_pt"] == []
-        if kwargs["frame_idx"] == 0:
-            if prompt_mode == "point":
-                assert kwargs["mask_inputs"] is None and kwargs["point_inputs"]["point_coords"].shape == (1, 1, 2)
-            else:
-                assert kwargs["point_inputs"] is None and kwargs["mask_inputs"].shape == (1, 1, 128, 128)
-        else:
-            assert kwargs["point_inputs"] is None and kwargs["mask_inputs"] is None
-    for index in range(4):
-        with Image.open(tmp_path / "video" / "memory_prediction" / f"{index * 3}.png") as result:
-            assert result.size == (133, 131) and result.mode == "L"
-            assert set(np.unique(result)) <= {0, 1, 2}
+@pytest.mark.parametrize("prompt_mode", ["mask", "point"])
+def test_memory_entry_uses_the_shared_baseline_runner(prompt_mode):
+    class MemoryFrames(FrameDataset):
+        def __getitem__(self, index):
+            frame = super().__getitem__(index)
+            frame["original_left_mask"] = frame["left_mask"].clone()
+            frame["original_right_mask"] = frame["right_mask"].clone()
+            frame["dataset_root"] = self.prefix
+            return frame
+
+    dataset = MemoryFrames(3, image_size=8, prefix="dataset")
+    dataset.streams = {
+        "dataset/sequence/cam-a": {
+            "dataset_name": "dataset",
+            "sample_indices": [0, 1, 2],
+            "frame_numbers": [0, 1, 2],
+        },
+    }
+    model = FakeMemoryModel()
+    args = SimpleNamespace(
+        model="memory",
+        device="cpu",
+        amp=False,
+        strategy="baseline",
+        prompt_mode=prompt_mode,
+        prompt_interval=200,
+        iou_threshold=0.5,
+        correction_points=3,
+        max_condition_frames=4,
+        log_interval=50,
+        prediction_dir_name="memory_prediction",
+        output_dir=None,
+    )
+    with patch.object(prediction, "save_prediction") as save:
+        assert prediction.run_prediction(model, dataset, args) == 3
+
+    assert save.call_count == 3
+    for hand in ("left", "right"):
+        calls = [call for call in model.calls if call["hand"] == hand]
+        assert [call["prompted"] for call in calls] == [True, False, False]
+        assert not any(call["corrected"] for call in calls)
 
 
-def test_multiview_entry_uses_explicit_prompt_plan():
+def test_multiview_entry_uses_fixed_prompt_strategy():
     class MultiViewFrames(FrameDataset):
         def __getitem__(self, index):
             frame = super().__getitem__(index)
@@ -205,11 +221,11 @@ def test_multiview_entry_uses_explicit_prompt_plan():
         device="cpu",
         amp=False,
         num_views=2,
+        strategy="fixed",
         prompt_mode="mask",
-        prompt_frame_indices=(0,),
-        correction_frame_indices=(1,),
+        prompt_interval=1,
+        iou_threshold=0.5,
         correction_points=3,
-        add_correction_frames_as_cond=True,
         max_condition_frames=4,
         disable_multiview_fusion=False,
         log_interval=50,
@@ -217,9 +233,6 @@ def test_multiview_entry_uses_explicit_prompt_plan():
         output_dir=None,
     )
 
-    request = prediction.build_multiview_prompt_request(args)
-    assert request.prompt_frame_indices == (0,)
-    assert request.correction_frame_indices == (1,)
     with patch.object(prediction, "save_prediction") as save:
         assert prediction.run_prediction(model, dataset, args) == 4
 
@@ -228,7 +241,7 @@ def test_multiview_entry_uses_explicit_prompt_plan():
     frame_zero = [call for call in model.calls if call["frame_idx"] == 0]
     frame_one = [call for call in model.calls if call["frame_idx"] == 1]
     assert all(call["prompted"] and not call["corrected"] for call in frame_zero)
-    assert all(call["corrected"] and call["correction_clicks"] == 3 for call in frame_one)
+    assert all(call["prompted"] and not call["corrected"] for call in frame_one)
 
 
 @pytest.mark.parametrize("folder", ["rgb_undistort", "RGB", "color", "images", "camera"])

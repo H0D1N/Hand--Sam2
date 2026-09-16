@@ -1,4 +1,4 @@
-"""统一运行 SAM2、Framewise、Memory 和 MultiView 双手分割推理。"""
+"""推理/评估唯一 CLI：定义参数、校验参数并分发执行。"""
 
 from __future__ import annotations
 
@@ -12,18 +12,15 @@ import torch
 
 from inference.builder import build_model
 from inference.dataset import build_frame_dataset, build_loader
-from inference.evaluation import (
-    add_evaluation_arguments,
-    run_evaluation,
-    validate_evaluation_args,
+from inference.evaluation import run_evaluation
+from inference.long_video_dataset import (
+    LongVideoDataset,
+    build_full_gt_frame_dataset,
 )
-from inference.long_video_dataset import LongVideoDataset
 from inference.output import prediction_path, save_prediction
 from inference.streaming import EvaluationPolicy, LongVideoEvaluator
 from projects.framewise_sam2_modified.dataset import build_center_point_prompt
 from projects.framewise_sam2_modified.utils import configure_runtime
-from sam2.modeling.sam2_utils import get_next_point
-from training.model.sam2_multiview_dual_hand_memory import PromptRequest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -33,117 +30,159 @@ DEFAULT_DATASET_NAMES = (
     "wuwen_4-5090_release-0623-compressed",
     "tencent_4-5090_7.5",
 )
+MODELS = ("sam2", "framewise", "memory", "multiview")
+DATASETS = ("multiserver", "dexycb", "mixed")
+STRATEGIES = ("baseline", "fixed", "adaptive")
+SINGLE_FRAME_MODELS = {"sam2", "framewise"}
+LONG_VIDEO_MODELS = {"memory", "multiview"}
+DEFAULT_DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def add_shared_arguments(parser: argparse.ArgumentParser) -> None:
+    model = parser.add_argument_group("model and runtime")
+    model.add_argument("--model", choices=MODELS, required=True, help="checkpoint 类型：原始 SAM2、单帧、单视角 Memory 或 MultiView。")
+    model.add_argument("--model-checkpoint", type=Path, required=True, help="模型 checkpoint 路径。")
+    model.add_argument("--image-size", type=int, default=768, help="原始 SAM2 的输入尺寸；训练 checkpoint 会覆盖此值。")
+    model.add_argument("--device", default=DEFAULT_DEVICE, help="例如 cuda:0 或 cpu。")
+    model.add_argument("--amp", action="store_true", help="在 CUDA 上启用 bfloat16 autocast。")
+    model.add_argument("--disable-tf32", action="store_true", help="关闭 CUDA TF32。")
+    model.add_argument("--log-interval", type=int, default=50, help="每处理 N 帧输出一次进度。")
+
+    data = parser.add_argument_group("dataset")
+    data.add_argument("--dataset", choices=DATASETS, default="multiserver", help="使用 MultiServer、DexYCB 或二者合并的数据。")
+    data.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT, help="MultiServer datasets.json 所在目录。")
+    data.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES, help="从 datasets.json 选择的数据集名称。")
+    data.add_argument("--test-seq-count", type=int, default=3, help="每个 MultiServer 数据集按自然顺序选取最后 N 个序列。")
+    data.add_argument("--dex-ycb-root", type=Path, help="DexYCB 根目录。")
+    data.add_argument("--dex-ycb-setup", default="s0", help="DexYCB setup，默认 s0。")
+    data.add_argument("--num-views", type=int, default=2, help="MultiView 同步推理使用的视角数。")
 
 
 def add_prediction_arguments(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("common")
-    common.add_argument(
-        "--model",
-        choices=("sam2", "framewise", "memory", "multiview"),
-        required=True,
-    )
-    common.add_argument("--model-checkpoint", type=Path, required=True)
-    common.add_argument("--prediction-dir-name", help="每个图像目录对应的推理文件夹名；默认 <model>_prediction。")
-    common.add_argument("--output-dir", type=Path, help="输出根目录；默认写回原图对应的相机目录。")
-    common.add_argument("--batch-size", type=int)
-    common.add_argument("--num-workers", type=int, default=4)
-    common.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
-    common.add_argument("--amp", action="store_true")
-    common.add_argument("--disable-tf32", action="store_true")
-    common.add_argument("--log-interval", type=int, default=50)
-    common.add_argument(
-        "--image-size",
-        type=int,
-        default=768,
-        help="仅原始 SAM2 checkpoint 需要；训练 checkpoint 会读取自身配置。",
-    )
-
-    data = parser.add_argument_group("dataset")
-    data.add_argument("--dataset", choices=("multiserver", "dexycb", "mixed"), default="multiserver")
-    data.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
-    data.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
-    data.add_argument("--test-seq-count", type=int, default=3)
-    data.add_argument("--dex-ycb-root", type=Path)
-    data.add_argument("--dex-ycb-setup", default="s0")
+    add_shared_arguments(parser)
+    output = parser.add_argument_group("prediction output")
+    output.add_argument("--output-dir", type=Path, help="预测输出根目录；不传时写回各相机目录。")
+    output.add_argument("--prediction-dir-name", help="预测 mask 子目录名；默认 <model>_prediction。")
+    output.add_argument("--batch-size", type=int, help="单帧模型默认 2；长视频模型固定为 1。")
+    output.add_argument("--num-workers", type=int, default=4, help="DataLoader worker 数。")
 
     framewise = parser.add_argument_group("framewise")
-    framewise.add_argument("--use-point-prompt", action="store_true")
+    framewise.add_argument("--use-point-prompt", action="store_true", help="Framewise 每帧使用 GT 中心点；原始 SAM2 始终使用该提示。")
 
-    memory = parser.add_argument_group("memory")
-    memory.add_argument("--prompt-mode", choices=("mask", "point", "auto"), default="mask")
+    prompt = parser.add_argument_group("prompt strategy")
+    prompt.add_argument("--strategy", choices=STRATEGIES, default="baseline", help="Memory/MultiView 策略：baseline 仅首帧；fixed 定期提示；adaptive 按 IoU 纠错。")
+    prompt.add_argument("--prompt-mode", choices=("mask", "point"), default="mask", help="Memory/MultiView 首帧及 fixed 提示使用 GT mask 或 GT 中心点。")
+    prompt.add_argument("--prompt-interval", type=int, default=200, help="fixed：从每段第 0 帧开始，每 N 帧重新提示。")
+    prompt.add_argument("--iou-threshold", type=float, default=0.5, help="adaptive：当前预测低于该 IoU 时开始连续点纠错。")
+    prompt.add_argument("--correction-points", type=int, default=10, help="adaptive：每帧每只手的最大点击数；达到 IoU 阈值会提前停止。")
+    prompt.add_argument("--max-condition-frames", type=int, default=4, help="Memory 中最多保留的提示/纠错条件帧数。")
 
-    multiview = parser.add_argument_group("multiview PromptPlan")
-    multiview.add_argument("--num-views", type=int, default=2)
-    multiview.add_argument(
-        "--prompt-frame-indices",
-        type=int,
-        nargs="+",
-        default=(0,),
-        help="使用 mask/point Prompt 的相对帧下标。",
-    )
-    multiview.add_argument(
-        "--correction-frame-indices",
-        type=int,
-        nargs="*",
-        default=(),
-        help="追加 GT 误差点纠错的相对帧下标。",
-    )
-    multiview.add_argument(
-        "--correction-points",
-        type=int,
-        default=10,
-        help="每个纠错帧、每只手追加的纠错点数。",
-    )
-    multiview.add_argument("--max-condition-frames", type=int, default=4)
-    multiview.add_argument(
-        "--add-correction-frames-as-cond",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    multiview.add_argument("--disable-multiview-fusion", action="store_true")
+    multiview = parser.add_argument_group("multiview")
+    multiview.add_argument("--disable-multiview-fusion", action="store_true", help="关闭 MultiView 跨视角融合。")
 
 
-def validate_prediction_args(args, parser: argparse.ArgumentParser) -> None:
-    args.prediction_dir_name = args.prediction_dir_name or f"{args.model}_prediction"
-    if args.batch_size is None:
-        args.batch_size = 1 if args.model in {"memory", "multiview"} else 2
-    if args.batch_size < 1 or (
-        args.model in {"memory", "multiview"} and args.batch_size != 1
-    ):
-        parser.error(
-            "batch-size 必须为正整数，memory/multiview 推理仅支持 "
-            "--batch-size 1"
-        )
+def add_evaluation_arguments(parser: argparse.ArgumentParser) -> None:
+    add_shared_arguments(parser)
+    output = parser.add_argument_group("evaluation output")
+    output.add_argument("--output-dir", type=Path, required=True, help="CSV、JSON、曲线和可选预测图的输出目录。")
+    output.add_argument("--save-predictions", action="store_true", help="同时保存每种配置的预测 mask PNG。")
+    output.add_argument("--plot-curves", action="store_true", help="评估完成后生成 IoU PNG 曲线。")
+    output.add_argument("--plot-dpi", type=int, default=200, help="曲线 PNG 的 DPI。")
+
+    prompt = parser.add_argument_group("prompt strategy sweep")
+    prompt.add_argument("--strategies", nargs="+", choices=STRATEGIES, default=("baseline",), help="要评估的策略；可同时传入 baseline fixed adaptive。")
+    prompt.add_argument("--prompt-mode", choices=("none", "mask", "point"), help="普通提示类型；默认 SAM2=point、Framewise=none、长视频模型=mask。")
+    prompt.add_argument("--fixed-intervals", type=int, nargs="+", default=(80,), help="fixed 扫描的提示间隔，例如 20 40 80 160。")
+    prompt.add_argument("--adaptive-thresholds", type=float, nargs="+", default=(0.5,), help="adaptive 扫描的 IoU 阈值，例如 0.3 0.5 0.7。")
+    prompt.add_argument("--correction-points", type=int, default=10, help="adaptive 每帧每只手的最大点击数；达到阈值会提前停止。")
+    prompt.add_argument("--max-condition-frames", type=int, default=4, help="Memory 中最多保留的提示/纠错条件帧数。")
+
+    metrics = parser.add_argument_group("evaluation range and metrics")
+    metrics.add_argument("--min-sequence-length", type=int, default=2, help="忽略短于 N 帧的连续视频段。")
+    metrics.add_argument("--max-sequences", type=int, help="只评估前 N 条长视频，用于 smoke test。")
+    metrics.add_argument("--metric-start-frame", type=int, default=1, help="汇总指标从相对第 N 帧开始，默认排除首帧提示。")
+    metrics.add_argument("--min-sequence-coverage", type=float, default=0.5, help="时序曲线保留点所需的最小视频覆盖比例。")
+    metrics.add_argument("--seed", type=int, default=42, help="随机种子。")
+
+
+def validate_shared_args(args, parser: argparse.ArgumentParser) -> None:
     if args.dataset in {"dexycb", "mixed"} and args.dex_ycb_root is None:
         parser.error(f"--dataset {args.dataset} 需要 --dex-ycb-root")
     if args.image_size <= 0 or args.image_size % 16 != 0:
         parser.error("--image-size 必须为 16 的正整数倍")
+    if args.test_seq_count < 1:
+        parser.error("--test-seq-count 必须大于 0")
+    if args.log_interval < 1:
+        parser.error("--log-interval 必须大于 0")
+    if args.model == "multiview" and args.num_views < 2:
+        parser.error("multiview 要求 --num-views 至少为 2")
+
+
+def validate_prediction_args(args, parser: argparse.ArgumentParser) -> None:
+    validate_shared_args(args, parser)
+    args.prediction_dir_name = args.prediction_dir_name or f"{args.model}_prediction"
+    if args.batch_size is None:
+        args.batch_size = 1 if args.model in LONG_VIDEO_MODELS else 2
+    if args.batch_size < 1:
+        parser.error("--batch-size 必须大于 0")
+    if args.model in LONG_VIDEO_MODELS and args.batch_size != 1:
+        parser.error("memory/multiview 仅支持 --batch-size 1")
+
     if args.model == "sam2":
         args.use_point_prompt = True
-    if args.model == "multiview":
-        if args.num_views < 2:
-            parser.error("multiview 推理要求 --num-views 至少为 2")
-        if args.prompt_mode == "auto":
-            parser.error("multiview 长视频推理需要明确的 mask 或 point PromptPlan")
-        if any(index < 0 for index in args.prompt_frame_indices):
-            parser.error("--prompt-frame-indices 不能包含负数")
-        if any(index < 0 for index in args.correction_frame_indices):
-            parser.error("--correction-frame-indices 不能包含负数")
-        if 0 not in args.prompt_frame_indices:
-            parser.error("multiview 因果推理的 PromptPlan 必须包含第 0 帧")
-        if args.correction_points < 1:
-            parser.error("--correction-points 必须大于 0")
-        if args.max_condition_frames < 1:
-            parser.error("--max-condition-frames 必须大于 0")
-        args.prompt_frame_indices = tuple(dict.fromkeys(args.prompt_frame_indices))
-        args.correction_frame_indices = tuple(
-            dict.fromkeys(args.correction_frame_indices)
-        )
-        args.mask_frame_indices = tuple(sorted(
-            set(args.prompt_frame_indices) | set(args.correction_frame_indices)
-        ))
-    else:
-        args.mask_frame_indices = (0,)
+    if args.model in SINGLE_FRAME_MODELS and args.strategy != "baseline":
+        parser.error("sam2/framewise 只支持 baseline 逐帧推理")
+    if args.prompt_interval < 1:
+        parser.error("--prompt-interval 必须大于 0")
+    if not 0.0 <= args.iou_threshold <= 1.0:
+        parser.error("--iou-threshold 必须位于 [0, 1]")
+    if args.correction_points < 1:
+        parser.error("--correction-points 必须大于 0")
+    if args.max_condition_frames < 1:
+        parser.error("--max-condition-frames 必须大于 0")
+    args.mask_frame_indices = (0,)
+    args.mask_frame_interval = (
+        args.prompt_interval if args.strategy == "fixed" else None
+    )
+
+
+def validate_evaluation_args(args, parser: argparse.ArgumentParser) -> None:
+    validate_shared_args(args, parser)
+    if args.prompt_mode is None:
+        args.prompt_mode = {
+            "sam2": "point",
+            "framewise": "none",
+            "memory": "mask",
+            "multiview": "mask",
+        }[args.model]
+
+    if args.model == "sam2" and args.prompt_mode != "point":
+        parser.error("sam2 评估需要 --prompt-mode point")
+    if args.model == "framewise" and args.prompt_mode not in {"none", "point"}:
+        parser.error("framewise 评估只支持 --prompt-mode none/point")
+    if args.model in LONG_VIDEO_MODELS and args.prompt_mode == "none":
+        parser.error("memory/multiview 评估需要 --prompt-mode mask/point")
+    if args.model in SINGLE_FRAME_MODELS and tuple(args.strategies) != ("baseline",):
+        parser.error("sam2/framewise 只支持 baseline 逐帧评估")
+
+    if any(interval < 1 for interval in args.fixed_intervals):
+        parser.error("--fixed-intervals 必须全部大于 0")
+    if any(not 0.0 <= value <= 1.0 for value in args.adaptive_thresholds):
+        parser.error("--adaptive-thresholds 必须全部位于 [0, 1]")
+    if args.correction_points < 1:
+        parser.error("--correction-points 必须大于 0")
+    if args.max_condition_frames < 1:
+        parser.error("--max-condition-frames 必须大于 0")
+    if args.min_sequence_length < 1:
+        parser.error("--min-sequence-length 必须大于 0")
+    if args.metric_start_frame < 0:
+        parser.error("--metric-start-frame 不能小于 0")
+    if args.max_sequences is not None and args.max_sequences < 1:
+        parser.error("--max-sequences 必须大于 0")
+    if not 0.0 <= args.min_sequence_coverage <= 1.0:
+        parser.error("--min-sequence-coverage 必须位于 [0, 1]")
+    if args.plot_dpi < 1:
+        parser.error("--plot-dpi 必须大于 0")
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -206,93 +245,52 @@ def predict_framewise(model, loader, args) -> int:
 
 
 @torch.inference_mode()
-def predict_memory(model, dataset, args) -> int:
-    count = 0
-    for stream_id, stream in dataset.streams.items():
-        loader = build_loader(dataset, args, sample_indices=stream["sample_indices"])
-        state = model.init_state(loader)
-        for hand in ("left", "right"):
-            mask = state["first_frame"][f"{hand}_mask"]
-            if args.prompt_mode == "point":
-                coords, labels = get_next_point(gt_masks=mask.bool(), pred_masks=None, method=model.pt_sampling_for_eval)
-                model.add_points(state, hand, {"point_coords": coords, "point_labels": labels})
-                del coords, labels
-            else:
-                model.add_mask(state, hand, mask)
-        del mask
-        with _autocast(args):
-            for frame_idx, outputs, frame_info in model.propagate_in_video(state):
-                save_prediction(
-                    image_path=frame_info["image_path"], original_size=frame_info["original_size"],
-                    left_logits=outputs["left"]["pred_masks_high_res"],
-                    right_logits=outputs["right"]["pred_masks_high_res"],
-                    prediction_dir_name=args.prediction_dir_name,
-                    output_dir=getattr(args, "output_dir", None),
-                    dataset_root=frame_info["dataset_root"],
-                )
-                count += 1
-                if (frame_idx + 1) % args.log_interval == 0 or frame_idx + 1 == state["num_frames"]:
-                    logging.info("memory | %s | %d/%d frames | %d images", stream_id, frame_idx + 1, state["num_frames"], count)
-                del outputs
-        del state, loader
-    return count
-
-
-def build_multiview_prompt_request(args) -> PromptRequest:
-    """把推理参数组成训练模型使用的同一种 PromptRequest。"""
-    return PromptRequest(
-        mode=args.prompt_mode,
-        start_frame_idx=0,
-        prompt_frame_indices=tuple(args.prompt_frame_indices),
-        correction_frame_indices=tuple(args.correction_frame_indices),
-        num_correction_points_per_frame=args.correction_points,
-        add_correction_frames_as_cond=args.add_correction_frames_as_cond,
-    )
-
-
-@torch.inference_mode()
-def predict_multiview(model, frame_dataset, args) -> int:
-    request = build_multiview_prompt_request(args)
+def predict_long_video(model, frame_dataset, args) -> int:
+    """Memory/MultiView 共用 baseline、fixed、adaptive 流式推理。"""
+    num_views = args.num_views if args.model == "multiview" else 1
     dataset = LongVideoDataset(
         frame_dataset,
-        num_views=args.num_views,
+        num_views=num_views,
         min_sequence_length=1,
     )
     if not dataset.sequences:
         raise ValueError(
-            f"没有找到至少包含 {args.num_views} 个同步视角的视频序列"
+            f"没有找到至少包含 {num_views} 个同步视角的视频序列"
         )
 
-    model.set_multiview_fusion_enabled(not args.disable_multiview_fusion)
+    if args.model == "multiview":
+        model.set_multiview_fusion_enabled(
+            not args.disable_multiview_fusion
+        )
     policy = EvaluationPolicy(
-        strategy="explicit",
-        prompt_mode=request.mode,
-        correction_points=request.num_correction_points_per_frame,
+        strategy=args.strategy,
+        prompt_mode=args.prompt_mode,
+        prompt_interval=args.prompt_interval,
+        iou_threshold=args.iou_threshold,
+        correction_points=args.correction_points,
         max_condition_frames=args.max_condition_frames,
-        prompt_frame_indices=request.prompt_frame_indices,
-        correction_frame_indices=request.correction_frame_indices or (),
-        add_correction_frames_as_cond=request.add_correction_frames_as_cond,
     )
     evaluator = LongVideoEvaluator(
         model=model,
-        model_type="multiview",
+        model_type=args.model,
         device=args.device,
         policy=policy,
         amp=args.amp,
         log_interval=args.log_interval,
     )
-
     view_sets_by_sequence = defaultdict(set)
     for sequence in dataset.sequences:
         view_sets_by_sequence[sequence.sequence_id].add(sequence.view_names)
 
     logging.info(
-        "MultiView PromptPlan | prompt_mode=%s | prompt_frames=%s | "
-        "correction_frames=%s | correction_points=%d | sequences=%d",
-        request.mode,
-        list(request.prompt_frame_indices),
-        list(request.correction_frame_indices or ()),
-        request.num_correction_points_per_frame,
+        "%s | strategy=%s | prompt_mode=%s | prompt_interval=%d | "
+        "iou_threshold=%.3f | correction_points_cap=%d | sequences=%d",
+        args.model,
+        args.strategy,
+        args.prompt_mode,
+        args.prompt_interval,
+        args.iou_threshold,
+        args.correction_points,
         len(dataset.sequences),
     )
 
@@ -325,8 +323,9 @@ def predict_multiview(model, frame_dataset, args) -> int:
             collect_metrics=False,
         )
         logging.info(
-            "multiview | sequence %d/%d complete | %s | frames=%d | "
+            "%s | sequence %d/%d complete | %s | frames=%d | "
             "predictions=%d",
+            args.model,
             sequence_index,
             len(dataset.sequences),
             sequence.evaluation_id,
@@ -342,9 +341,7 @@ def run_prediction(model, dataset, args) -> int:
     """统一推理入口；Memory/MultiView 按长视频逐帧传播。"""
     if args.model in {"sam2", "framewise"}:
         return predict_framewise(model, build_loader(dataset, args), args)
-    if args.model == "memory":
-        return predict_memory(model, dataset, args)
-    return predict_multiview(model, dataset, args)
+    return predict_long_video(model, dataset, args)
 
 
 def main() -> None:
@@ -358,7 +355,18 @@ def main() -> None:
         torch.device(args.device), use_tf32=not args.disable_tf32
     )
     model = build_model(args)
-    dataset = build_frame_dataset(args)
+    if args.model in {"memory", "multiview"} and args.strategy == "adaptive":
+        dataset = build_full_gt_frame_dataset(
+            dataset_mode=args.dataset,
+            image_size=args.image_size,
+            dataset_root=args.dataset_root,
+            dataset_names=args.dataset_names,
+            test_seq_count=args.test_seq_count,
+            dex_ycb_root=args.dex_ycb_root,
+            dex_ycb_setup=args.dex_ycb_setup,
+        )
+    else:
+        dataset = build_frame_dataset(args)
     count = run_prediction(model, dataset, args)
     logging.info("Prediction complete | %d images", count)
 

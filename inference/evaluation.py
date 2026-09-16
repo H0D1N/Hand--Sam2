@@ -1,12 +1,10 @@
-"""运行 memory / multiview 的长视频提示策略评估。"""
+"""执行长视频评估并输出指标；CLI 参数统一定义在 run_prediction.py。"""
 
 from __future__ import annotations
 
-import argparse
 from collections import defaultdict
 import csv
 import logging
-from pathlib import Path
 
 import torch
 
@@ -25,14 +23,6 @@ from projects.framewise_sam2_modified.utils import (
     set_seed,
 )
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATASET_ROOT = REPO_ROOT / "framewise_data/dataset"
-DEFAULT_DATASET_NAMES = (
-    "xingyi_4-5090_oak150-100output",
-    "wuwen_4-5090_release-0623-compressed",
-    "tencent_4-5090_7.5",
-)
 
 CSV_FIELDS = (
     "model",
@@ -245,131 +235,6 @@ def build_policies(args) -> list[EvaluationPolicy]:
     return policies
 
 
-def add_evaluation_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--model",
-        choices=("sam2", "framewise", "memory", "multiview"),
-        required=True,
-    )
-    parser.add_argument("--model-checkpoint", type=Path, required=True)
-    parser.add_argument(
-        "--image-size",
-        type=int,
-        default=768,
-        help="仅原始 SAM2 checkpoint 需要。",
-    )
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument(
-        "--strategies",
-        nargs="+",
-        choices=("baseline", "fixed", "adaptive"),
-        default=("baseline",),
-    )
-    parser.add_argument(
-        "--prompt-mode",
-        choices=("none", "mask", "point"),
-        help="默认：SAM2=point，Framewise=none，Memory/MultiView=mask。",
-    )
-    parser.add_argument("--fixed-intervals", type=int, nargs="+", default=(80,))
-    parser.add_argument(
-        "--adaptive-thresholds", type=float, nargs="+", default=(0.5,)
-    )
-    parser.add_argument(
-        "--correction-points",
-        type=int,
-        default=10,
-        help="单次 adaptive 纠错允许的最大点击轮数",
-    )
-    parser.add_argument("--max-condition-frames", type=int, default=4)
-
-    parser.add_argument(
-        "--dataset",
-        dest="dataset_mode",
-        choices=("multiserver", "dexycb", "mixed"),
-        default="multiserver",
-    )
-    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
-    parser.add_argument("--dataset-names", nargs="+", default=DEFAULT_DATASET_NAMES)
-    parser.add_argument("--test-seq-count", type=int, default=3)
-    parser.add_argument("--dex-ycb-root", type=Path)
-    parser.add_argument("--num-views", type=int, default=2)
-    parser.add_argument("--min-sequence-length", type=int, default=2)
-
-    parser.add_argument("--metric-start-frame", type=int, default=1)
-    parser.add_argument("--max-sequences", type=int)
-    parser.add_argument(
-        "--log-interval",
-        type=int,
-        default=50,
-        help="每处理多少帧输出一次进度",
-    )
-    parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--amp", action="store_true")
-    parser.add_argument("--disable-tf32", action="store_true")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--save-predictions",
-        action="store_true",
-        help="同时把每个评估配置的最终预测保存为 PNG。",
-    )
-    parser.add_argument(
-        "--plot-curves",
-        action="store_true",
-        help="评估完成后立即生成 IoU PNG 曲线。",
-    )
-    parser.add_argument("--min-sequence-coverage", type=float, default=0.5)
-    parser.add_argument("--plot-dpi", type=int, default=200)
-
-
-def validate_evaluation_args(args, parser: argparse.ArgumentParser) -> None:
-    if args.dataset_mode in {"dexycb", "mixed"} and args.dex_ycb_root is None:
-        parser.error("--dataset dexycb/mixed 需要提供 --dex-ycb-root")
-    if args.model == "multiview" and args.num_views < 2:
-        parser.error("multiview 模型要求 --num-views 至少为 2")
-    if args.prompt_mode is None:
-        args.prompt_mode = {
-            "sam2": "point",
-            "framewise": "none",
-            "memory": "mask",
-            "multiview": "mask",
-        }[args.model]
-    if args.model == "sam2" and args.prompt_mode != "point":
-        parser.error("sam2 评估需要 --prompt-mode point")
-    if args.model == "framewise" and args.prompt_mode not in {"none", "point"}:
-        parser.error("framewise 评估只支持 --prompt-mode none/point")
-    if args.model in {"memory", "multiview"} and args.prompt_mode == "none":
-        parser.error("memory/multiview 评估需要 mask 或 point Prompt")
-    if args.model in {"sam2", "framewise"} and tuple(args.strategies) != (
-        "baseline",
-    ):
-        parser.error("sam2/framewise 只支持 baseline 逐帧评估")
-    if args.image_size <= 0 or args.image_size % 16 != 0:
-        parser.error("--image-size 必须为 16 的正整数倍")
-    if any(interval < 1 for interval in args.fixed_intervals):
-        parser.error("--fixed-intervals 必须全部大于 0")
-    if any(
-        not 0.0 <= threshold <= 1.0
-        for threshold in args.adaptive_thresholds
-    ):
-        parser.error("--adaptive-thresholds 必须全部位于 [0, 1]")
-    if args.correction_points < 1:
-        parser.error("--correction-points 最大点击轮数必须大于 0")
-    if args.max_condition_frames < 1:
-        parser.error("--max-condition-frames 必须大于 0")
-    if args.min_sequence_length < 1:
-        parser.error("--min-sequence-length 必须大于 0")
-    if args.metric_start_frame < 0:
-        parser.error("--metric-start-frame 不能小于 0")
-    if args.max_sequences is not None and args.max_sequences < 1:
-        parser.error("--max-sequences 必须大于 0")
-    if args.log_interval < 1:
-        parser.error("--log-interval 必须大于 0")
-    if not 0.0 <= args.min_sequence_coverage <= 1.0:
-        parser.error("--min-sequence-coverage 必须位于 [0, 1]")
-    if args.plot_dpi < 1:
-        parser.error("--plot-dpi 必须大于 0")
-
-
 def run_evaluation(args) -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
@@ -390,12 +255,13 @@ def run_evaluation(args) -> None:
     else:
         model = load_trained_model(args.model, args.model_checkpoint, device)
     frame_dataset = build_full_gt_frame_dataset(
-        dataset_mode=args.dataset_mode,
+        dataset_mode=args.dataset,
         image_size=model.image_size,
         dataset_root=args.dataset_root,
         dataset_names=args.dataset_names,
         test_seq_count=args.test_seq_count,
         dex_ycb_root=args.dex_ycb_root,
+        dex_ycb_setup=args.dex_ycb_setup,
     )
     dataset = LongVideoDataset(
         frame_dataset,

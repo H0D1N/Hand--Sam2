@@ -11,8 +11,8 @@ python3 -m inference.run_prediction {predict,evaluate} ...
 ```
 
 `predict` accepts four checkpoint types: `sam2`, `framewise`, `memory`, and
-`multiview`. MultiView uses an explicit PromptPlan. For example, use GT masks on
-frames 0/80/160 and three correction clicks on frames 120/240:
+`multiview`. Memory and MultiView use the same three prompt strategies as
+evaluation. For example, provide a GT mask every 200 frames:
 
 ```bash
 python3 -m inference.run_prediction predict \
@@ -20,15 +20,30 @@ python3 -m inference.run_prediction predict \
   --model-checkpoint outputs/multiview/experiment/checkpoints/best.pt \
   --output-dir outputs/prediction \
   --num-views 2 \
+  --strategy fixed \
   --prompt-mode mask \
-  --prompt-frame-indices 0 80 160 \
-  --correction-frame-indices 120 240 \
-  --correction-points 3
+  --prompt-interval 200
 ```
 
-Only Prompt/correction frames need masks in `predict`; other frames require RGB
-only. `--prompt-mode point` converts the GT mask on ordinary Prompt frames into
-a center point. Correction frames use SAM2 positive/negative error points.
+`baseline` only needs a mask on frame 0. `fixed` needs masks on frames
+`0, N, 2N, ...`; all other frames only need RGB. `--prompt-mode point` converts
+the GT mask on ordinary prompt frames into a center point.
+
+Adaptive prediction requires GT on every frame because it decides online whether
+to correct the current prediction. Once IoU is below the threshold, it repeatedly
+adds SAM2 positive/negative error clicks and recomputes the mask until the IoU
+reaches the threshold. `--correction-points` is only the per-hand, per-frame
+safety cap; it does not mean that adaptive correction clicks only once:
+
+```bash
+python3 -m inference.run_prediction predict \
+  --model memory \
+  --model-checkpoint outputs/memory/experiment/checkpoints/best.pt \
+  --output-dir outputs/prediction \
+  --strategy adaptive \
+  --iou-threshold 0.7 \
+  --correction-points 10
+```
 
 `evaluate` also accepts all four model types and requires full-frame GT. SAM2 is
 evaluated with a point prompt on every frame; Framewise defaults to no prompt

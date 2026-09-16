@@ -61,7 +61,7 @@ class FakeFrameDataset:
 
 
 class FakeMemoryModel(nn.Module):
-    def __init__(self, correction_succeeds=True):
+    def __init__(self, correction_succeeds=True, correction_succeeds_after=1):
         super().__init__()
         self.anchor = nn.Parameter(torch.zeros(()))
         self.image_size = IMAGE_SIZE
@@ -70,6 +70,7 @@ class FakeMemoryModel(nn.Module):
         self.max_obj_ptrs_in_encoder = 3
         self.use_obj_ptrs_in_encoder = True
         self.correction_succeeds = correction_succeeds
+        self.correction_succeeds_after = correction_succeeds_after
         self.calls = []
 
     def forward_image(self, images):
@@ -108,7 +109,10 @@ class FakeMemoryModel(nn.Module):
                 correction_clicks += 1
                 logits = (
                     gt_masks.float() * 20.0 - 10.0
-                    if self.correction_succeeds
+                    if (
+                        self.correction_succeeds
+                        and correction_clicks >= self.correction_succeeds_after
+                    )
                     else torch.full_like(gt_masks, -10.0, dtype=torch.float32)
                 )
                 if correction_stop_fn is not None and correction_stop_fn(logits):
@@ -116,7 +120,10 @@ class FakeMemoryModel(nn.Module):
         self.calls.append({
             "hand": hand,
             "frame_idx": frame_idx,
-            "prompted": mask_inputs is not None,
+            "prompted": (
+                mask_inputs is not None
+                or kwargs.get("point_inputs") is not None
+            ),
             "corrected": corrected,
             "run_mem_encoder": run_mem_encoder,
             "num_views": kwargs.get("num_views"),
@@ -302,6 +309,27 @@ def check_adaptive_correction_stops_at_safety_cap():
     assert all(row["correction_clicks"] == 3 for row in corrected_rows)
 
 
+def check_adaptive_correction_repeats_until_threshold():
+    evaluator = LongVideoEvaluator(
+        model=FakeMemoryModel(correction_succeeds_after=2),
+        model_type="memory",
+        device="cpu",
+        policy=EvaluationPolicy(
+            strategy="adaptive",
+            iou_threshold=0.5,
+            correction_points=4,
+        ),
+    )
+    rows = evaluator.evaluate_sequence(
+        ThreeFrameDataset(), build_three_frame_sequence()
+    )
+
+    corrected_rows = [row for row in rows if row["corrected"]]
+    assert corrected_rows
+    assert all(row["iou_after"] == 1.0 for row in corrected_rows)
+    assert all(row["correction_clicks"] == 2 for row in corrected_rows)
+
+
 def check_fixed_prompts_repeat_the_initial_prompt():
     evaluator = LongVideoEvaluator(
         model=FakeMemoryModel(),
@@ -443,6 +471,7 @@ def main():
     check_natural_validation_sequence_selection()
     check_adaptive_correction_is_decided_before_memory_commit()
     check_adaptive_correction_stops_at_safety_cap()
+    check_adaptive_correction_repeats_until_threshold()
     check_fixed_prompts_repeat_the_initial_prompt()
     check_explicit_prompt_plan_and_prediction_callback()
     check_framewise_model_uses_long_video_metrics_format()
