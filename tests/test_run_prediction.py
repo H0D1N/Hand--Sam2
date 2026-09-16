@@ -184,6 +184,10 @@ def test_memory_entry_uses_the_shared_baseline_runner(prompt_mode):
         assert prediction.run_prediction(model, dataset, args) == 3
 
     assert save.call_count == 3
+    assert {
+        call.kwargs["prediction_dir_name"]
+        for call in save.call_args_list
+    } == {"memory_prediction"}
     for hand in ("left", "right"):
         calls = [call for call in model.calls if call["hand"] == hand]
         assert [call["prompted"] for call in calls] == [True, False, False]

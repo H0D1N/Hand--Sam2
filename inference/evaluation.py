@@ -326,7 +326,10 @@ def run_evaluation(args) -> None:
                 prediction_callback = None
                 if args.save_predictions:
                     prediction_dir_name = "prediction"
-                    if len(view_sets_by_sequence[sequence.sequence_id]) > 1:
+                    if (
+                        args.model == "multiview"
+                        and len(view_sets_by_sequence[sequence.sequence_id]) > 1
+                    ):
                         prediction_dir_name += "/" + "+".join(sequence.view_names)
 
                     def prediction_callback(*, frame, predictions, **_):

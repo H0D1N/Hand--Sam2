@@ -297,7 +297,10 @@ def predict_long_video(model, frame_dataset, args) -> int:
     count = 0
     for sequence_index, sequence in enumerate(dataset.sequences, start=1):
         prediction_dir_name = args.prediction_dir_name
-        if len(view_sets_by_sequence[sequence.sequence_id]) > 1:
+        if (
+            args.model == "multiview"
+            and len(view_sets_by_sequence[sequence.sequence_id]) > 1
+        ):
             prediction_dir_name = (
                 f"{prediction_dir_name}/" + "+".join(sequence.view_names)
             )
