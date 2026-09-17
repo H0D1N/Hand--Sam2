@@ -123,8 +123,8 @@ def main() -> None:
 
     logging.info(
         "MULTIVIEW EVALUATION COMPLETE | "
-        "split=%s | loss=%.4f | mask_focal=%.4f | "
-        "dice_loss=%.4f | iou_loss=%.4f | class_loss=%.4f | "
+        "split=%s | loss=%.4f | loss_mask=%.4f | "
+        "loss_dice=%.4f | loss_iou=%.4f | loss_class=%.4f | "
         "iou=%.4f | dice=%.4f | "
         "obj_acc=%.4f | obj_precision=%.4f | "
         "obj_recall=%.4f | obj_f1=%.4f",

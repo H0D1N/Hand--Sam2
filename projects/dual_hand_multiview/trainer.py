@@ -154,7 +154,8 @@ def run_training_epoch(
             }
             logging.info(
                 "Epoch %d | step %d/%d | loss=%.4f | "
-                "mask_focal=%.4f | dice=%.4f | iou_loss=%.4f | class_loss=%.4f",
+                "loss_mask=%.4f | loss_dice=%.4f | "
+                "loss_iou=%.4f | loss_class=%.4f",
                 epoch + 1,
                 step,
                 num_steps,
@@ -346,12 +347,18 @@ def run_validation_epoch(
             overall = stats["overall"]
             logging.info(
                 "%s Eval Epoch %d | step %d/%d | "
-                "loss=%.4f | iou=%.4f | dice=%.4f",
+                "loss=%.4f | loss_mask=%.4f | loss_dice=%.4f | "
+                "loss_iou=%.4f | loss_class=%.4f | "
+                "iou=%.4f | dice=%.4f",
                 evaluation_split.upper(),
                 epoch + 1,
                 step,
                 len(loader),
                 overall["loss_sum"] / overall["clips"],
+                overall["loss_mask_sum"] / overall["clips"],
+                overall["loss_dice_sum"] / overall["clips"],
+                overall["loss_iou_sum"] / overall["clips"],
+                overall["loss_class_sum"] / overall["clips"],
                 overall["iou_sum"] / max(overall["foreground_hands"], 1),
                 overall["dice_sum"] / max(overall["foreground_hands"], 1),
             )

@@ -276,6 +276,20 @@ def main():
             epoch + 1, train_metrics["loss"], overall_val["loss"], overall_val["iou"], overall_val["dice"], current_lr,
         )
         logging.info(
+            "Epoch %d | loss components | "
+            "train(loss_mask=%.4f, loss_dice=%.4f, loss_iou=%.4f, loss_class=%.4f) | "
+            "val(loss_mask=%.4f, loss_dice=%.4f, loss_iou=%.4f, loss_class=%.4f)",
+            epoch + 1,
+            (train_metrics["left_loss_mask"] + train_metrics["right_loss_mask"]) / 2.0,
+            (train_metrics["left_loss_dice"] + train_metrics["right_loss_dice"]) / 2.0,
+            (train_metrics["left_loss_iou"] + train_metrics["right_loss_iou"]) / 2.0,
+            (train_metrics["left_loss_class"] + train_metrics["right_loss_class"]) / 2.0,
+            overall_val["loss_mask"],
+            overall_val["loss_dice"],
+            overall_val["loss_iou"],
+            overall_val["loss_class"],
+        )
+        logging.info(
             "Epoch %d | multiview residual scales | %s",
             epoch + 1,
             residual_scales,
