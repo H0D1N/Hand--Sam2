@@ -66,6 +66,13 @@ def _empty_output_dict() -> dict:
     }
 
 
+def _format_frame_indices(indices: list[int], limit: int = 20) -> str:
+    if len(indices) <= limit:
+        return str(indices)
+    edge = limit // 2
+    return f"{indices[:edge]} ... {indices[-edge:]}"
+
+
 def _original_iou_per_view(
     logits: torch.Tensor,
     original_masks: list[torch.Tensor],
@@ -202,6 +209,12 @@ class LongVideoEvaluator:
 
         output_dict = _empty_output_dict()
         rows = []
+        ordinary_frame_indices = []
+        ordinary_prompt_count = 0
+        correction_frame_indices = set()
+        correction_hand_events = 0
+        correction_positive_points = 0
+        correction_negative_points = 0
 
         for frame_index in range(sequence.num_frames):
             frame = dataset.load_frame(sequence, frame_index)
@@ -211,6 +224,8 @@ class LongVideoEvaluator:
                 for hand in ("left", "right")
             }
             is_prompt_frame = self._is_prompt_frame(frame_index)
+            if is_prompt_frame:
+                ordinary_frame_indices.append(frame_index)
             is_explicit_correction = (
                 self.policy.strategy == "explicit"
                 and frame_index in self.policy.correction_frame_indices
@@ -248,8 +263,12 @@ class LongVideoEvaluator:
                     if is_prompt_frame:
                         if self.policy.prompt_mode == "mask":
                             mask_inputs = gt_masks
+                            ordinary_prompt_count += gt_masks.size(0)
                         elif self.policy.prompt_mode == "point":
                             point_inputs = build_center_point_prompt(gt_masks)
+                            ordinary_prompt_count += int(
+                                (point_inputs["point_labels"] >= 0).sum().item()
+                            )
 
                     corrected = False
                     if self.policy.strategy == "adaptive" and not is_prompt_frame:
@@ -323,6 +342,14 @@ class LongVideoEvaluator:
                         len(current_out["multistep_point_inputs"]) - 1
                         if corrected else 0
                     )
+                    if corrected:
+                        correction_frame_indices.add(frame_index)
+                        correction_hand_events += 1
+                        final_points = current_out["multistep_point_inputs"][-1]
+                        if final_points is not None:
+                            labels = final_points["point_labels"]
+                            correction_positive_points += int((labels == 1).sum().item())
+                            correction_negative_points += int((labels == 0).sum().item())
 
                     memory_kind = (
                         "cond_frame_outputs"
@@ -426,6 +453,25 @@ class LongVideoEvaluator:
                     sequence.num_frames,
                 )
 
+        correction_indices = sorted(correction_frame_indices)
+        logging.info(
+            "%s | %s | prompt summary | ordinary_type=%s | "
+            "ordinary_frames=%d %s | ordinary_count=%d | "
+            "correction_frames=%d %s | correction_hand_events=%d | "
+            "correction_points=%d (+%d/-%d)",
+            self.policy.configuration,
+            sequence.evaluation_id,
+            "gt_mask" if self.policy.prompt_mode == "mask" else "gt_center_point",
+            len(ordinary_frame_indices),
+            _format_frame_indices(ordinary_frame_indices),
+            ordinary_prompt_count,
+            len(correction_indices),
+            _format_frame_indices(correction_indices),
+            correction_hand_events,
+            correction_positive_points + correction_negative_points,
+            correction_positive_points,
+            correction_negative_points,
+        )
         return rows
 
 

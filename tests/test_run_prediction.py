@@ -194,7 +194,7 @@ def test_memory_entry_uses_the_shared_baseline_runner(prompt_mode):
         assert not any(call["corrected"] for call in calls)
 
 
-def test_multiview_entry_uses_fixed_prompt_strategy():
+def test_multiview_entry_uses_fixed_prompt_strategy(caplog):
     class MultiViewFrames(FrameDataset):
         def __getitem__(self, index):
             frame = super().__getitem__(index)
@@ -237,6 +237,7 @@ def test_multiview_entry_uses_fixed_prompt_strategy():
         output_dir=None,
     )
 
+    caplog.set_level(20)
     with patch.object(prediction, "save_prediction") as save:
         assert prediction.run_prediction(model, dataset, args) == 4
 
@@ -246,6 +247,9 @@ def test_multiview_entry_uses_fixed_prompt_strategy():
     frame_one = [call for call in model.calls if call["frame_idx"] == 1]
     assert all(call["prompted"] and not call["corrected"] for call in frame_zero)
     assert all(call["prompted"] and not call["corrected"] for call in frame_one)
+    assert "ordinary_type=gt_mask" in caplog.text
+    assert "ordinary_frames=2 [0, 1]" in caplog.text
+    assert "ordinary_count=8" in caplog.text
 
 
 @pytest.mark.parametrize("folder", ["rgb_undistort", "RGB", "color", "images", "camera"])
