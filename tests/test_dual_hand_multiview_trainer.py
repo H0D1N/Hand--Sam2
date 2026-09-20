@@ -40,6 +40,8 @@ class FakeEvaluationLoss(nn.Module):
                 "loss_dice": torch.tensor(3.0),
                 "loss_iou": torch.tensor(4.0),
                 "loss_class": torch.tensor(5.0),
+                "loss_gated": torch.tensor(60.0),
+                "loss_gate_amplification": torch.tensor(8.0),
             }
             for hand in ("left", "right")
         }
@@ -84,6 +86,8 @@ def check_validation_reports_loss_components():
     assert metrics["loss_dice"] == 3.0
     assert metrics["loss_iou"] == 4.0
     assert metrics["loss_class"] == 5.0
+    assert metrics["loss_gated"] == 60.0
+    assert metrics["loss_gate_amplification"] == 8.0
 
 
 def main():

@@ -12,9 +12,14 @@ import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sam2.modeling.sam2_base import NO_OBJ_SCORE
 from training.trainer import CORE_LOSS_KEY
 
 from training.utils.distributed import get_world_size, is_dist_avail_and_initialized
+
+
+GATED_LOSS_KEY = "loss_gated"
+GATE_AMPLIFICATION_KEY = "loss_gate_amplification"
 
 
 def dice_loss(inputs, targets, num_objects, loss_on_multimask=False):
@@ -186,11 +191,11 @@ class MultiStepMultiMasksAndIous(nn.Module):
         Compute the losses related to the masks: the focal loss and the dice loss.
         and also the MAE or MSE loss between predicted IoUs and actual IoUs.
 
-        Here "multistep_pred_multimasks_high_res" is a list of multimasks (tensors
+        Here "multistep_pred_multimasks_high_res" is a list of raw multimasks (tensors
         of shape [N, M, H, W], where M could be 1 or larger, corresponding to
         one or multiple predicted masks from a click.
 
-        We back-propagate focal, dice losses only on the prediction channel
+        We back-propagate focal, dice losses only on the raw prediction channel
         with the lowest focal+dice loss between predicted mask and ground-truth.
         If `supervise_all_iou` is True, we backpropagate ious losses for all predicted masks.
         """
@@ -205,7 +210,15 @@ class MultiStepMultiMasksAndIous(nn.Module):
         assert len(object_score_logits_list) == len(ious_list)
 
         # accumulate the loss over prediction steps
-        losses = {"loss_mask": 0, "loss_dice": 0, "loss_iou": 0, "loss_class": 0}
+        losses = {
+            "loss_mask": 0,
+            "loss_dice": 0,
+            "loss_iou": 0,
+            "loss_class": 0,
+            "loss_mask_gated": 0,
+            "loss_dice_gated": 0,
+            "loss_iou_gated": 0,
+        }
         for src_masks, ious, object_score_logits in zip(
             src_masks_list, ious_list, object_score_logits_list
         ):
@@ -213,13 +226,23 @@ class MultiStepMultiMasksAndIous(nn.Module):
                 losses, src_masks, target_masks, ious, num_objects, object_score_logits
             )
         losses[CORE_LOSS_KEY] = self.reduce_loss(losses)
+        losses[GATED_LOSS_KEY] = sum(
+            weight
+            * (
+                losses[f"{name}_gated"]
+                if name in {"loss_mask", "loss_dice", "loss_iou"}
+                else losses[name].detach()
+            )
+            for name, weight in self.weight_dict.items()
+        )
+        losses[GATE_AMPLIFICATION_KEY] = (
+            losses[GATED_LOSS_KEY] - losses[CORE_LOSS_KEY].detach()
+        )
         return losses
 
-    def _update_losses(
-        self, losses, src_masks, target_masks, ious, num_objects, object_score_logits
+    def _compute_mask_losses(
+        self, src_masks, target_masks, ious, num_objects, target_obj
     ):
-        target_masks = target_masks.expand_as(src_masks)
-        # get focal, dice and iou loss on all output masks in a prediction step
         loss_multimask = sigmoid_focal_loss(
             src_masks,
             target_masks,
@@ -231,28 +254,6 @@ class MultiStepMultiMasksAndIous(nn.Module):
         loss_multidice = dice_loss(
             src_masks, target_masks, num_objects, loss_on_multimask=True
         )
-        if not self.pred_obj_scores:
-            loss_class = torch.tensor(
-                0.0, dtype=loss_multimask.dtype, device=loss_multimask.device
-            )
-            target_obj = torch.ones(
-                loss_multimask.shape[0],
-                1,
-                dtype=loss_multimask.dtype,
-                device=loss_multimask.device,
-            )
-        else:
-            target_obj = torch.any((target_masks[:, 0] > 0).flatten(1), dim=-1)[
-                ..., None
-            ].float()
-            loss_class = sigmoid_focal_loss(
-                object_score_logits,
-                target_obj,
-                num_objects,
-                alpha=self.focal_alpha_obj_score,
-                gamma=self.focal_gamma_obj_score,
-            )
-
         loss_multiiou = iou_loss(
             src_masks,
             target_masks,
@@ -289,11 +290,49 @@ class MultiStepMultiMasksAndIous(nn.Module):
         loss_mask = loss_mask * target_obj
         loss_dice = loss_dice * target_obj
         loss_iou = loss_iou * target_obj
+        return loss_mask.sum(), loss_dice.sum(), loss_iou.sum()
 
-        # sum over batch dimension (note that the losses are already divided by num_objects)
-        losses["loss_mask"] += loss_mask.sum()
-        losses["loss_dice"] += loss_dice.sum()
-        losses["loss_iou"] += loss_iou.sum()
+    def _update_losses(
+        self, losses, src_masks, target_masks, ious, num_objects, object_score_logits
+    ):
+        target_masks = target_masks.expand_as(src_masks)
+        target_obj = torch.any((target_masks[:, 0] > 0).flatten(1), dim=-1)[
+            ..., None
+        ].float()
+        if self.pred_obj_scores:
+            loss_class = sigmoid_focal_loss(
+                object_score_logits,
+                target_obj,
+                num_objects,
+                alpha=self.focal_alpha_obj_score,
+                gamma=self.focal_gamma_obj_score,
+            )
+        else:
+            loss_class = src_masks.new_zeros(())
+            target_obj = torch.ones_like(target_obj)
+
+        raw_losses = self._compute_mask_losses(
+            src_masks, target_masks, ious, num_objects, target_obj
+        )
+        with torch.no_grad():
+            gated_src_masks = torch.where(
+                object_score_logits[:, None, None] > 0,
+                src_masks.detach(),
+                NO_OBJ_SCORE,
+            )
+            gated_losses = self._compute_mask_losses(
+                gated_src_masks,
+                target_masks,
+                ious.detach(),
+                num_objects,
+                target_obj,
+            )
+
+        for name, raw_loss, gated_loss in zip(
+            ("loss_mask", "loss_dice", "loss_iou"), raw_losses, gated_losses
+        ):
+            losses[name] += raw_loss
+            losses[f"{name}_gated"] += gated_loss
         losses["loss_class"] += loss_class
 
     def reduce_loss(self, losses):

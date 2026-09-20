@@ -124,22 +124,24 @@ class SAM2Modified(SAM2Train):
             repeat_image=False,  # the image is already batched
             high_res_features=high_res_features,
         )
+        raw_low_res_multimasks = low_res_multimasks.float()
         if self.pred_obj_scores:
             is_obj_appearing = object_score_logits > 0
 
             # Mask used for spatial memories is always a *hard* choice between obj and no obj,
             # consistent with the actual mask prediction
-            low_res_multimasks = torch.where(
+            gated_low_res_multimasks = torch.where(
                 is_obj_appearing[:, None, None],
-                low_res_multimasks,
+                raw_low_res_multimasks,
                 NO_OBJ_SCORE,
             )
+        else:
+            gated_low_res_multimasks = raw_low_res_multimasks
 
-        # convert masks from possibly bfloat16 (or float16) to float32
-        # (older PyTorch versions before 2.1 don't support `interpolate` on bf16)
-        low_res_multimasks = low_res_multimasks.float()
-        high_res_multimasks = F.interpolate(
-            low_res_multimasks,
+        # Raw candidates supervise segmentation; hard-gated masks remain the actual
+        # prediction used by correction, output, and spatial memory.
+        raw_high_res_multimasks = F.interpolate(
+            raw_low_res_multimasks,
             size=(self.image_size, self.image_size),
             mode="bilinear",
             align_corners=False,
@@ -150,12 +152,17 @@ class SAM2Modified(SAM2Train):
             # take the best mask prediction (with the highest IoU estimation)
             best_iou_inds = torch.argmax(ious, dim=-1)
             batch_inds = torch.arange(B, device=device)
-            low_res_masks = low_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
-            high_res_masks = high_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
+            low_res_masks = gated_low_res_multimasks[batch_inds, best_iou_inds].unsqueeze(1)
             if sam_output_tokens.size(1) > 1:
                 sam_output_token = sam_output_tokens[batch_inds, best_iou_inds]
         else:
-            low_res_masks, high_res_masks = low_res_multimasks, high_res_multimasks
+            low_res_masks = gated_low_res_multimasks
+        high_res_masks = F.interpolate(
+            low_res_masks,
+            size=(self.image_size, self.image_size),
+            mode="bilinear",
+            align_corners=False,
+        )
 
         # Extract object pointer from the SAM output token (with occlusion handling)
         obj_ptr = self.obj_ptr_proj(sam_output_token)
@@ -171,8 +178,8 @@ class SAM2Modified(SAM2Train):
             obj_ptr = obj_ptr + (1 - lambda_is_obj_appearing) * self.no_obj_ptr
 
         return (
-            low_res_multimasks,
-            high_res_multimasks,
+            raw_low_res_multimasks,
+            raw_high_res_multimasks,
             ious,
             low_res_masks,
             high_res_masks,

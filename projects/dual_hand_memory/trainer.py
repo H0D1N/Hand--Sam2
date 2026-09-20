@@ -21,6 +21,16 @@ from projects.framewise_sam2_modified.visualization import (
 HIGH_CLASS_LOSS_THRESHOLD = 50.0
 
 
+def _accumulate_validation_loss(stats, loss, loss_details, num_clips):
+    stats["loss_sum"] += loss.item() * num_clips
+    for name in LOSS_NAMES:
+        mean_hand_loss = (
+            loss_details["left"][name] + loss_details["right"][name]
+        ) / 2.0
+        stats[f"{name}_sum"] += mean_hand_loss.item() * num_clips
+    stats["clips"] += num_clips
+
+
 def _log_high_class_loss_batch(
     batch,
     frame_outputs,
@@ -291,7 +301,7 @@ def run_training_epoch(
             logging.info(
                 "Epoch %d | step %d/%d | loss=%.4f | "
                 "mask_focal=%.4f | dice=%.4f | iou_loss=%.4f | "
-                "class_loss=%.4f",
+                "class_loss=%.4f | gated_loss=%.4f | gate_amp=%.4f",
                 epoch + 1,
                 step,
                 num_steps,
@@ -300,6 +310,8 @@ def run_training_epoch(
                 mean_details["loss_dice"].detach().item(),
                 mean_details["loss_iou"].detach().item(),
                 mean_details["loss_class"].detach().item(),
+                mean_details["loss_gated"].detach().item(),
+                mean_details["loss_gate_amplification"].detach().item(),
             )
 
     if total_clips == 0:
@@ -328,6 +340,7 @@ def run_validation_epoch(
     stats = {
         name: {
             "loss_sum": 0.0, "clips": 0, "iou_sum": 0.0, "dice_sum": 0.0,
+            **{f"{loss_name}_sum": 0.0 for loss_name in LOSS_NAMES},
             "foreground_hands": 0, "object_tp": 0, "object_tn": 0, "object_fp": 0, "object_fn": 0,
         }
         for name in ("overall", "multiserver", "dexycb")
@@ -352,20 +365,33 @@ def run_validation_epoch(
             prompt_mode=args.prompt_mode,
             correction_frame_indices=correction_frame_indices,
         )
-        loss, _ = loss_fn(frame_outputs, left_masks, right_masks,)
+        loss, loss_details = loss_fn(frame_outputs, left_masks, right_masks)
 
         batch_size = images.size(0)
         num_frames = images.size(1)
         dataset_groups = ["dexycb" if name.lower() == "dexycb" else "multiserver" for name in batch["dataset_name"]]
-        stats["overall"]["loss_sum"] += loss.item() * batch_size
-        stats["overall"]["clips"] += batch_size
+        _accumulate_validation_loss(
+            stats["overall"], loss, loss_details, batch_size
+        )
         for dataset_group in ("multiserver", "dexycb"):
             sample_indices = [index for index, group in enumerate(dataset_groups) if group == dataset_group]
             if not sample_indices:
                 continue
-            group_loss = loss if len(sample_indices) == batch_size else loss_fn(frame_outputs, left_masks, right_masks, sample_indices=sample_indices)[0]
-            stats[dataset_group]["loss_sum"] += group_loss.item() * len(sample_indices)
-            stats[dataset_group]["clips"] += len(sample_indices)
+            if len(sample_indices) == batch_size:
+                group_loss, group_loss_details = loss, loss_details
+            else:
+                group_loss, group_loss_details = loss_fn(
+                    frame_outputs,
+                    left_masks,
+                    right_masks,
+                    sample_indices=sample_indices,
+                )
+            _accumulate_validation_loss(
+                stats[dataset_group],
+                group_loss,
+                group_loss_details,
+                len(sample_indices),
+            )
         visual_sequence_indices = {}
 
         # [B T C H W]
@@ -455,9 +481,12 @@ def run_validation_epoch(
         if step % max(args.log_interval, 1) == 0 or step == len(loader):
             overall = stats["overall"]
             logging.info(
-                "Val Epoch %d | step %d/%d | loss=%.4f | iou=%.4f | dice=%.4f",
+                "Val Epoch %d | step %d/%d | loss=%.4f | "
+                "gated_loss=%.4f | gate_amp=%.4f | iou=%.4f | dice=%.4f",
                 epoch + 1, step, len(loader),
                 overall["loss_sum"] / overall["clips"],
+                overall["loss_gated_sum"] / overall["clips"],
+                overall["loss_gate_amplification_sum"] / overall["clips"],
                 overall["iou_sum"] / max(overall["foreground_hands"], 1),
                 overall["dice_sum"] / max(overall["foreground_hands"], 1),
             )
@@ -468,13 +497,17 @@ def run_validation_epoch(
     result = {}
     for name, values in stats.items():
         if values["clips"] == 0:
-            result[name] = {metric: None for metric in ("loss", "iou", "dice", "object_accuracy", "object_precision", "object_recall", "object_f1")}
+            result[name] = {metric: None for metric in ("loss", *LOSS_NAMES, "iou", "dice", "object_accuracy", "object_precision", "object_recall", "object_f1")}
             continue
         object_total = sum(values[key] for key in ("object_tp", "object_tn", "object_fp", "object_fn"))
         object_precision = values["object_tp"] / max(values["object_tp"] + values["object_fp"], 1)
         object_recall = values["object_tp"] / max(values["object_tp"] + values["object_fn"], 1)
         result[name] = {
             "loss": values["loss_sum"] / values["clips"],
+            **{
+                loss_name: values[f"{loss_name}_sum"] / values["clips"]
+                for loss_name in LOSS_NAMES
+            },
             "iou": values["iou_sum"] / max(values["foreground_hands"], 1),
             "dice": values["dice_sum"] / max(values["foreground_hands"], 1),
             "object_accuracy": (values["object_tp"] + values["object_tn"]) / max(object_total, 1),

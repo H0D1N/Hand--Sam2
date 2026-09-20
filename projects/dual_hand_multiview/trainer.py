@@ -155,7 +155,8 @@ def run_training_epoch(
             logging.info(
                 "Epoch %d | step %d/%d | loss=%.4f | "
                 "loss_mask=%.4f | loss_dice=%.4f | "
-                "loss_iou=%.4f | loss_class=%.4f",
+                "loss_iou=%.4f | loss_class=%.4f | "
+                "gated_loss=%.4f | gate_amp=%.4f",
                 epoch + 1,
                 step,
                 num_steps,
@@ -164,6 +165,8 @@ def run_training_epoch(
                 mean_losses["loss_dice"].detach().item(),
                 mean_losses["loss_iou"].detach().item(),
                 mean_losses["loss_class"].detach().item(),
+                mean_losses["loss_gated"].detach().item(),
+                mean_losses["loss_gate_amplification"].detach().item(),
             )
 
     if total_clips == 0:
@@ -349,6 +352,7 @@ def run_validation_epoch(
                 "%s Eval Epoch %d | step %d/%d | "
                 "loss=%.4f | loss_mask=%.4f | loss_dice=%.4f | "
                 "loss_iou=%.4f | loss_class=%.4f | "
+                "gated_loss=%.4f | gate_amp=%.4f | "
                 "iou=%.4f | dice=%.4f",
                 evaluation_split.upper(),
                 epoch + 1,
@@ -359,6 +363,8 @@ def run_validation_epoch(
                 overall["loss_dice_sum"] / overall["clips"],
                 overall["loss_iou_sum"] / overall["clips"],
                 overall["loss_class_sum"] / overall["clips"],
+                overall["loss_gated_sum"] / overall["clips"],
+                overall["loss_gate_amplification_sum"] / overall["clips"],
                 overall["iou_sum"] / max(overall["foreground_hands"], 1),
                 overall["dice_sum"] / max(overall["foreground_hands"], 1),
             )

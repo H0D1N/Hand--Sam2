@@ -30,7 +30,14 @@ class ToySequenceModel(torch.nn.Module):
         self.correction_frames = set(correction_frames)
         self.correction_steps = correction_steps
 
-    def forward(self, images, left_masks, right_masks, prompt_mode):
+    def forward(
+        self,
+        images,
+        left_masks,
+        right_masks,
+        prompt_mode,
+        correction_frame_indices=None,
+    ):
         self.calls.append((tuple(images.shape), prompt_mode))
         batch_size, num_frames, _, height, width = images.shape
         frame_outputs = []
@@ -229,7 +236,7 @@ def check_validation_epoch():
     assert model.single_image_calls == []
     assert set(metrics) == {"overall", "multiserver", "dexycb"}
     metric_names = {
-        "loss", "iou", "dice", "object_accuracy",
+        "loss", *LOSS_NAMES, "iou", "dice", "object_accuracy",
         "object_precision", "object_recall", "object_f1",
     }
     assert all(set(group_metrics) == metric_names for group_metrics in metrics.values())

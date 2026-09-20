@@ -1,13 +1,24 @@
 import torch.nn as nn
 
-from training.loss_fns import MultiStepMultiMasksAndIous
+from training.loss_fns import (
+    GATED_LOSS_KEY,
+    GATE_AMPLIFICATION_KEY,
+    MultiStepMultiMasksAndIous,
+)
 from training.trainer import CORE_LOSS_KEY
 
 
-LOSS_NAMES = ("loss_mask", "loss_dice", "loss_iou", "loss_class",)
+LOSS_NAMES = (
+    "loss_mask",
+    "loss_dice",
+    "loss_iou",
+    "loss_class",
+    GATED_LOSS_KEY,
+    GATE_AMPLIFICATION_KEY,
+)
 
 class DualHandMemoryLoss(nn.Module):
-    """使用 SAM2 原版多轮 loss 计算左右手序列 loss。"""
+    """用 raw mask 计算 SAM2 多轮 loss，并报告硬门控后的诊断 loss。"""
 
     def __init__(
         self,

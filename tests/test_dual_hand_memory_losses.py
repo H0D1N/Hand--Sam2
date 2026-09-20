@@ -80,7 +80,7 @@ def check_official_sam2_configuration():
     assert sam2_loss.focal_alpha_obj_score == -1.0
 
 
-def check_wrapper_matches_original_sam2_loss():
+def check_wrapper_matches_sequence_loss():
     frame_outputs, left_masks, right_masks, trainable_tensors = build_test_data()
     loss_fn = DualHandMemoryLoss()
 
@@ -133,6 +133,31 @@ def check_empty_hand_only_trains_class_loss():
     assert details["right"]["loss_class"].item() > 0.0
 
 
+def check_false_negative_keeps_raw_mask_supervision():
+    frame_outputs, left_masks, right_masks, _ = build_test_data()
+    raw_logits = frame_outputs[0]["left"]["multistep_pred_multimasks_high_res"][0]
+    object_logits = frame_outputs[0]["left"]["multistep_object_score_logits"][0]
+    with torch.no_grad():
+        object_logits.fill_(-1.0)
+
+    loss, details = DualHandMemoryLoss()(frame_outputs, left_masks, right_masks)
+    loss.backward()
+
+    assert torch.count_nonzero(raw_logits.grad).item() > 0
+    assert torch.count_nonzero(object_logits.grad).item() > 0
+    raw_total = (
+        20.0 * details["left"]["loss_mask"]
+        + details["left"]["loss_dice"]
+        + details["left"]["loss_iou"]
+        + details["left"]["loss_class"]
+    )
+    assert details["left"]["loss_gated"] > raw_total
+    assert torch.allclose(
+        details["left"]["loss_gate_amplification"],
+        details["left"]["loss_gated"] - raw_total,
+    )
+
+
 def check_invalid_frame_count():
     frame_outputs, left_masks, right_masks, _ = build_test_data()
 
@@ -165,11 +190,12 @@ def check_empty_sequence():
 
 def main():
     check_official_sam2_configuration()
-    check_wrapper_matches_original_sam2_loss()
+    check_wrapper_matches_sequence_loss()
     check_empty_hand_only_trains_class_loss()
+    check_false_negative_keeps_raw_mask_supervision()
     check_invalid_frame_count()
     check_empty_sequence()
-    print("SAM2DualHandMemory original SAM2 losses: OK")
+    print("SAM2DualHandMemory raw/gated losses: OK")
 
 
 if __name__ == "__main__":
