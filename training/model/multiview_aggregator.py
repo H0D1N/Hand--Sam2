@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from sam2.modeling.sam.transformer import RoPEAttention
 from sam2.modeling.sam2_utils import get_activation_fn, get_clones
@@ -47,20 +48,26 @@ class MultiViewAggregationLayer(nn.Module):
 
         self.output_dropout = nn.Dropout(dropout)
 
-    def forward(self, tgt, source_tokens, source_pos):
-        tgt = self._forward_cross_attention(tgt, source_tokens, source_pos)
+    def forward(self, tgt, source_tokens, source_pos, source_weights=None):
+        tgt = self._forward_cross_attention(tgt, source_tokens, source_pos, source_weights)
         tgt = self._forward_self_attention(tgt)
         tgt = self._forward_mlp(tgt)
         return tgt
 
-    def _forward_cross_attention(self, tgt, source_tokens, source_pos):
+    def _forward_cross_attention(self, tgt, source_tokens, source_pos, source_weights=None):
         tgt_res = self.cross_attention_norm(tgt)
 
-        tgt_res = self.cross_attn(
-            q=tgt_res,
-            k=source_tokens + source_pos,
-            v=source_tokens,
-        )
+        if source_weights is None:
+            tgt_res = self.cross_attn(q=tgt_res, k=source_tokens + source_pos, v=source_tokens)
+        else:
+            attention = self.cross_attn
+            q = attention._separate_heads(attention.q_proj(tgt_res), attention.num_heads)
+            k = attention._separate_heads(attention.k_proj(source_tokens + source_pos), attention.num_heads)
+            v = attention._separate_heads(attention.v_proj(source_tokens), attention.num_heads)
+            attention_bias = torch.log(source_weights.to(q.dtype) + 1e-6)[:, None, None, :]
+            dropout_p = attention.dropout_p if self.training else 0.0
+            tgt_res = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_bias, dropout_p=dropout_p)
+            tgt_res = attention.out_proj(attention._recombine_heads(tgt_res))
 
         return tgt + self.cross_attention_dropout(tgt_res)
 
@@ -104,9 +111,7 @@ class MultiViewFeatureAggregator(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
         # M个聚合Query
-        self.latent_tokens = nn.Parameter(
-            torch.empty(1, num_latents, d_model)
-        )
+        self.latent_tokens = nn.Parameter(torch.empty(1, num_latents, d_model))
         nn.init.trunc_normal_(self.latent_tokens, std=0.02)
 
 
@@ -114,6 +119,7 @@ class MultiViewFeatureAggregator(nn.Module):
         self,
         multiview_features: torch.Tensor,  # [B, V, N, C]
         multiview_pos: torch.Tensor,  # [B, V, N, C] pos_enc for multiview_features
+        view_weights: torch.Tensor | None = None,  # [B, V]
     ):
         assert multiview_features.ndim == 4
         assert multiview_pos.shape == multiview_features.shape
@@ -123,6 +129,10 @@ class MultiViewFeatureAggregator(nn.Module):
 
         view_tokens = multiview_features.reshape(B, V * N, C)
         view_token_encoding = multiview_pos.reshape(B, V * N, C)
+        source_weights = None
+        if view_weights is not None:
+            assert view_weights.shape == (B, V)
+            source_weights = view_weights[..., None].expand(B, V, N).reshape(B, V * N)
 
         shared_tokens = self.latent_tokens.expand(B, -1, -1)
 
@@ -131,6 +141,7 @@ class MultiViewFeatureAggregator(nn.Module):
                 tgt=shared_tokens,
                 source_tokens=view_tokens,
                 source_pos=view_token_encoding,
+                source_weights=source_weights,
             )
 
         return self.norm(shared_tokens)

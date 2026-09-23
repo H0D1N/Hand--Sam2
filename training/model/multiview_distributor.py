@@ -26,23 +26,20 @@ class MultiViewDistributionLayer(nn.Module):
         self.cross_attention_norm = nn.LayerNorm(d_model)
         self.cross_attn = cross_attention
         self.cross_attention_dropout = nn.Dropout(dropout)
-        self.residual_scale = nn.Parameter(
-            torch.tensor(float(residual_scale_init))
-        )
+        self.residual_scale = nn.Parameter(torch.tensor(float(residual_scale_init)))
 
     def forward(
         self,
         view_tokens: torch.Tensor,    # [B, V*N, C]
         view_pos: torch.Tensor,       # [B, V*N, C]
         shared_tokens: torch.Tensor,  # [B, M, C]
+        target_weights: torch.Tensor | None = None,  # [B, V*N, 1]
     ) -> torch.Tensor:
         view_tokens_norm = self.cross_attention_norm(view_tokens)
 
-        delta = self.cross_attn(
-            q=view_tokens_norm + view_pos,
-            k=shared_tokens,
-            v=shared_tokens,
-        )
+        delta = self.cross_attn(q=view_tokens_norm + view_pos, k=shared_tokens, v=shared_tokens)
+        if target_weights is not None:
+            delta = delta * target_weights.to(device=delta.device, dtype=delta.dtype)
 
         return view_tokens + self.residual_scale * self.cross_attention_dropout(delta)
 
@@ -63,6 +60,7 @@ class MultiViewFeatureDistributor(nn.Module):
         view_features: torch.Tensor,    # [B, V, N, C]
         view_pos: torch.Tensor,         # [B, V, N, C]
         shared_tokens: torch.Tensor,    # [B, M, C]
+        view_weights: torch.Tensor | None = None,  # [B, V]
     ) -> torch.Tensor:
         assert view_features.ndim == 4
         assert shared_tokens.ndim == 3
@@ -76,12 +74,17 @@ class MultiViewFeatureDistributor(nn.Module):
         # [B,V,N,C] -> [B,V*N,C]
         view_tokens = view_features.reshape(B, V * N, C)
         view_token_pos = view_pos.reshape(B, V * N, C)
+        target_weights = None
+        if view_weights is not None:
+            assert view_weights.shape == (B, V)
+            target_weights = view_weights[..., None, None].expand(B, V, N, 1).reshape(B, V * N, 1)
 
         for layer in self.layers:
             view_tokens = layer(
                 view_tokens=view_tokens,
                 view_pos=view_token_pos,
                 shared_tokens=shared_tokens,
+                target_weights=target_weights,
             )
 
         # [B,V*N,C] -> [B,V,N,C]

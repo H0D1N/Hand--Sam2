@@ -635,6 +635,11 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
             multiview_distributor = self.right_multiview_distributor
 
         # 2. Memory Attention -> 多视角融合 -> 第一次预测
+        multiview_fusion_gate = None
+        if gt_masks is not None:
+            view_presence = (gt_masks > 0).flatten(1).any(dim=1).reshape(batch_size, num_views)
+            multiview_fusion_gate = view_presence.to(dtype=main_feature.dtype)
+
         sam_outputs, pix_feat_with_mem_with_multiview = self._track_step(
             frame_idx=frame_idx,
             is_init_cond_frame=is_init_cond_frame,
@@ -653,6 +658,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
             batch_size=batch_size,
             num_views=num_views,
             track_in_reverse=track_in_reverse,
+            multiview_fusion_gate=multiview_fusion_gate,
         )
 
         (
@@ -767,6 +773,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         batch_size,
         num_views,
         track_in_reverse=False,
+        multiview_fusion_gate=None,
     ):
         """
         与父类的差异：在 Memory Attention 之后、Mask Decoder 之前，
@@ -811,6 +818,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
             batch_size=batch_size,
             num_views=num_views,
             feature_size=feature_size,
+            multiview_fusion_gate=multiview_fusion_gate,
         )
 
 
@@ -837,6 +845,7 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         batch_size,
         num_views,
         feature_size,           # (H, W)
+        multiview_fusion_gate=None,  # [B, V]，每个目标视角接收融合残差的连续权重
     ):
         """打包 BVNC、聚合共享 token、分发回各视角、解包回解码器输入格式。"""
         if not self.multiview_fusion_enabled:
@@ -856,12 +865,14 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         shared_tokens = multiview_aggregator(
             multiview_features=view_features,
             multiview_pos=view_pos,
+            view_weights=multiview_fusion_gate,
         )  # [B, M, C]
 
         distributed = multiview_distributor(
             view_features=view_features,
             view_pos=view_pos,
             shared_tokens=shared_tokens,
+            view_weights=multiview_fusion_gate,
         )  # [B, V, N, C]
 
         # [B, V, N, C] -> [B*V, C, H, W]，恢复为 Mask Decoder 的输入形状
