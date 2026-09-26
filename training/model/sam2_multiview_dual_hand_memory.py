@@ -635,11 +635,6 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
             multiview_distributor = self.right_multiview_distributor
 
         # 2. Memory Attention -> 多视角融合 -> 第一次预测
-        multiview_fusion_gate = None
-        if gt_masks is not None:
-            view_presence = (gt_masks > 0).flatten(1).any(dim=1).reshape(batch_size, num_views)
-            multiview_fusion_gate = view_presence.to(dtype=main_feature.dtype)
-
         sam_outputs, pix_feat_with_mem_with_multiview = self._track_step(
             frame_idx=frame_idx,
             is_init_cond_frame=is_init_cond_frame,
@@ -658,7 +653,6 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
             batch_size=batch_size,
             num_views=num_views,
             track_in_reverse=track_in_reverse,
-            multiview_fusion_gate=multiview_fusion_gate,
         )
 
         (
@@ -754,6 +748,23 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
 
         return current_out
 
+    def _predict_multiview_fusion_gate(
+        self, pix_feat, mask_decoder, high_res_features, point_inputs, mask_inputs,
+        is_init_cond_frame, batch_size, num_views,
+    ):
+        """用未融合特征的 object score 预测各视角的目标可见性。"""
+        with torch.no_grad():
+            object_score_logits = self._forward_one_sam_head(
+                mask_decoder=mask_decoder,
+                prompt_encoder=self.sam_prompt_encoder,
+                backbone_features=pix_feat,
+                point_inputs=point_inputs,
+                mask_inputs=mask_inputs,
+                high_res_features=high_res_features,
+                multimask_output=self._use_multimask(is_init_cond_frame, point_inputs),
+            )[-1]
+        return (object_score_logits > 0).reshape(batch_size, num_views).to(pix_feat.dtype)
+
     def _track_step(
         self,
         frame_idx,
@@ -773,7 +784,6 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         batch_size,
         num_views,
         track_in_reverse=False,
-        multiview_fusion_gate=None,
     ):
         """
         与父类的差异：在 Memory Attention 之后、Mask Decoder 之前，
@@ -808,7 +818,15 @@ class SAM2MultiViewDualHandMemory(SAM2DualHandMemory):
         )
         
 
-        # 2. 多视角融合：Aggregator 聚合成共享 token，Distributor 分发回各视角。
+        # 2. 用未融合特征预测可见性，再进行多视角融合。
+        multiview_fusion_gate = None
+        if self.multiview_fusion_enabled:
+            multiview_fusion_gate = self._predict_multiview_fusion_gate(
+                pix_feat_with_mem, mask_decoder, high_res_features, point_inputs,
+                mask_inputs, is_init_cond_frame, batch_size, num_views,
+            )
+
+        # Aggregator 聚合成共享 token，Distributor 分发回各视角。
         # pix_feat_with_mem_with_multiview: [B*V, C, H16, W16]，纠错轮复用该结果
         pix_feat_with_mem_with_multiview = self._fuse_multiview_features(
             pix_feat=pix_feat_with_mem,               
