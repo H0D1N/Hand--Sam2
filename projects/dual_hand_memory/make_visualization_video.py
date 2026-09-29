@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fps", type=float, default=2.0)
-    parser.add_argument("--sequence-gap-seconds", type=float, default=2.0)
+    parser.add_argument("--sequence-gap-seconds", type=float, default=0.0)
     return parser.parse_args()
 
 

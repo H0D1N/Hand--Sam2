@@ -386,7 +386,7 @@ class MultiServerDualHandDataset(Dataset):
 
             valid_sequence_dirs = list(cam_names_by_sequence)
 
-            if len(valid_sequence_dirs) <= test_seq_count:
+            if len(valid_sequence_dirs) < test_seq_count:
                 raise ValueError(
                     f"{dataset_name} 只有 {len(valid_sequence_dirs)} 条有效序列，"
                     f"必须大于 test_seq_count={test_seq_count}"
